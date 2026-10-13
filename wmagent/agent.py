@@ -91,7 +91,7 @@ class AgentConfig:
 
     @property
     def tool_output_chars(self) -> int:
-        return self.tool_output_tokens * 4
+        return tool_output_limit(self.tool_output_tokens)
 
 
 SAFETY_TOKENS = 512
@@ -150,17 +150,13 @@ CONTEXT_ERROR_MARKERS = (
     '"param":"input_tokens"',
 )
 
-# Always emitted by compact_result (missing ones default to False for flags, None otherwise), then
-# executed_actions (falling back to [action_display]).
-COMPACT_BASE_KEYS = (
-    "executed", "action_num", "level", "score", "reward", "state", "valid_actions", "board_changed", "done",
-    "level_completed", "game_over", "run_complete", "action_display",
-)
-COMPACT_FLAG_KEYS = frozenset({"executed", "board_changed", "done", "level_completed", "game_over", "run_complete"})
+# compact_result key rules (equivalence report, behaviour note F11), in emission order.
+COMPACT_COPIED_KEYS = ("action_num", "level", "score", "reward", "state")
+COMPACT_FLAG_KEYS = ("board_changed", "done", "level_completed", "game_over", "run_complete")
+COMPACT_BASE_KEYS = ("executed", *COMPACT_COPIED_KEYS, "valid_actions", *COMPACT_FLAG_KEYS, "action_display")
 COMPACT_KEYS = (*COMPACT_BASE_KEYS, "executed_actions")
-BATCH_KEYS = ("requested_count", "executed_count", "stopped_early")
-# Copied whenever present in the payload, None values included.
-EXTRA_KEYS = ("stop_reason", "stop_detail", "run_elapsed_seconds", "time_remaining_seconds", "error")
+TIMING_KEYS = ("run_elapsed_seconds", "time_remaining_seconds")
+# Terminal reasons that arm the per-cell latch, in priority order.
 TERMINAL_FLAGS = ("run_complete", "game_over", "level_completed", "done")
 
 
@@ -399,17 +395,58 @@ def to_label(name: str) -> str:
 
 
 def compact_result(payload: dict[str, Any]) -> dict[str, Any]:
-    compact = {key: payload.get(key, False if key in COMPACT_FLAG_KEYS else None) for key in COMPACT_BASE_KEYS}
+    """The step_env payload reduced to what the model sees (behaviour note F11)."""
+    display = payload.get("action_display") or payload.get("action_name") or None
+    compact: dict[str, Any] = {"executed": bool(payload.get("executed"))}
+    compact.update({key: payload.get(key) for key in COMPACT_COPIED_KEYS})
+    compact["valid_actions"] = payload["valid_actions"] if "valid_actions" in payload else []
+    compact.update({key: bool(payload.get(key)) for key in COMPACT_FLAG_KEYS})
+    compact["action_display"] = display
     executed_actions = payload.get("executed_actions")
-    if executed_actions is None:
-        display = payload.get("action_display")
-        executed_actions = [display] if display is not None else []
-    compact["executed_actions"] = executed_actions
-    batch_size = payload.get("requested_count", payload.get("batch_size", 1)) or 1
+    if isinstance(executed_actions, list) and executed_actions:
+        compact["executed_actions"] = [str(item).strip() for item in executed_actions if str(item).strip()]
+    elif display:
+        compact["executed_actions"] = [display]
+    counts = [payload[key] for key in ("requested_count", "executed_count") if payload.get(key) is not None]
+    batch_size = counts[0] if counts else 1
     if batch_size > 1 or payload.get("stopped_early"):
-        compact.update({key: payload[key] for key in BATCH_KEYS if key in payload})
-    compact.update({key: payload[key] for key in EXTRA_KEYS if key in payload})
+        compact["requested_count"] = payload.get("requested_count", batch_size)
+        compact["executed_count"] = payload.get("executed_count", batch_size)
+        compact["stopped_early"] = bool(payload.get("stopped_early"))
+    for key in ("stop_reason", "stop_detail"):
+        if payload.get(key):
+            compact[key] = payload[key]
+    compact.update({key: payload[key] for key in TIMING_KEYS if key in payload})
+    if payload.get("error"):
+        compact["error"] = payload["error"]
     return compact
+
+
+def latch_stub(latched: dict[str, Any], reason: str, requested: int) -> dict[str, Any]:
+    """What a later action() in the same cell returns after a terminal result (behaviour note F19)."""
+    details = {
+        "run_complete": "The game is already won; nothing more is played.",
+        "game_over": "An earlier action() in this cell ended in GAME_OVER; the level restarts before your next turn.",
+        "level_completed": "An earlier action() in this cell completed the level; look at the new board before "
+        "playing again.",
+        "done": "An earlier action() in this cell finished the run; nothing more is played.",
+    }
+    return {
+        "executed": False,
+        "action_num": latched.get("action_num"),
+        "level": latched.get("level"),
+        "score": latched.get("score"),
+        "reward": 0.0,
+        "state": latched.get("state"),
+        "valid_actions": [],
+        "board_changed": False,
+        **{key: bool(latched.get(key)) for key in ("done", "level_completed", "game_over", "run_complete")},
+        "requested_count": requested,
+        "executed_count": 0,
+        "stopped_early": True,
+        "stop_reason": f"previous_{reason}",
+        "stop_detail": details[reason],
+    }
 
 
 def executed_count_of(result: dict[str, Any]) -> int:
@@ -418,10 +455,36 @@ def executed_count_of(result: dict[str, Any]) -> int:
     return 1 if result.get("executed") else 0
 
 
+def tool_output_limit(tool_output_tokens: int) -> int:
+    return max(256, max(64, tool_output_tokens) * 4)
+
+
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n... [truncated {len(text) - limit} characters]"
+    return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
+
+
+class _Truncator:
+    """Cuts fields to the limit and remembers whether any was cut (behaviour note F16)."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.cut = False
+
+    def __call__(self, text: str) -> str:
+        if len(text) > self.limit:
+            self.cut = True
+        return _truncate(text, self.limit)
+
+    def finish(self, body: dict[str, Any], tokens: int) -> dict[str, Any]:
+        if self.cut:
+            body["truncated"] = True
+            body["truncation_note"] = (
+                f"Part of this output was cut off so the reply stays within the roughly {tokens}-token "
+                "budget for tool output."
+            )
+        return body
 
 
 def _collapse_planned(value: Any) -> Any:
@@ -771,7 +834,7 @@ class ToolAgent:
         try:
             compile(code, "<python_tool>", "exec")
         except SyntaxError as exc:
-            return json.dumps({"error": _truncate(f"Python syntax error: {exc}", limit)}, indent=2)
+            return json.dumps({"error": f"Python syntax error: {exc}"}, indent=2)
 
         run_python, refused = self.sandbox()
         cell = _Cell()
@@ -780,21 +843,10 @@ class ToolAgent:
             items = actions if isinstance(actions, list) else [actions]
             items = [{"action": a} if isinstance(a, str) else a for a in items]
             if cell.latched:
-                last = cell.results[-1] if cell.results else {}
-                stub = compact_result({
-                    "executed": False,
-                    "level": last.get("level"),
-                    "score": last.get("score"),
-                    "state": last.get("state"),
-                    "valid_actions": [],
-                    "requested_count": len(items),
-                    "executed_count": 0,
-                    "stopped_early": True,
-                    "stop_reason": f"previous_{cell.latched}",
-                    "stop_detail": f"An earlier action() in this cell already reported {cell.latched}; "
-                    "no further actions run in this cell. Look at the new board first.",
-                })
+                # no step_env and no gate; the stub is not compacted
+                stub = latch_stub(cell.latched_result, cell.latched, len(items))
                 cell.results.append(stub)
+                ctx.valid_actions = []
                 self.last_action_result = stub
                 return {"action_result": stub, "state": self._state(ctx)}
             # The gate's action accounting lives here, as in the original: the level is observed
@@ -819,6 +871,7 @@ class ToolAgent:
             for flag in TERMINAL_FLAGS if result.get("executed") else ():
                 if result.get(flag):
                     cell.latched = flag
+                    cell.latched_result = result
                     break
             if isinstance(payload.get("valid_actions"), list):
                 ctx.valid_actions = list(payload["valid_actions"])
@@ -831,7 +884,7 @@ class ToolAgent:
         had_error = bool(outcome.get("error"))
         if self.gate is not None:
             self.gate.after_cell(code, had_error, lambda src: self._backtest(src, ctx))
-        return format_tool_result(outcome, cell.results, limit)
+        return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens)
 
     def _state(self, ctx: _TurnContext) -> dict[str, Any]:
         return sandbox_state(load_runtime_state(ctx.state_path), ctx.valid_actions, self.last_action_result)
@@ -872,6 +925,7 @@ class ToolAgent:
 @dataclass
 class _Cell:
     latched: str | None = None
+    latched_result: dict[str, Any] = field(default_factory=dict)
     results: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -916,24 +970,27 @@ def summarize(results: list[dict[str, Any]], start_level: int) -> dict[str, Any]
     }
 
 
-def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, Any]], limit: int) -> str:
+def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, Any]], limit: int,
+                       tool_output_tokens: int | None = None) -> str:
+    tokens = tool_output_tokens if tool_output_tokens is not None else limit // 4
+    cut = _Truncator(limit)
     stdout = outcome.get("stdout") or ""
     if outcome.get("error"):
-        body: dict[str, Any] = {"tool": "python", "error": _truncate(str(outcome["error"]), limit)}
+        body: dict[str, Any] = {"tool": "python", "error": cut(str(outcome["error"]))}
         if stdout:
-            body["stdout"] = _truncate(str(stdout), limit)
-        return json.dumps(body, indent=2)
+            body["stdout"] = cut(str(stdout))
+        return json.dumps(cut.finish(body, tokens), indent=2)
     # Exactly one of: stdout, else result, else the single action result, else the action summary;
     # the last two go under `result` too (the original's precedence).
     body = {"tool": "python", "returncode": 0}
-    result = outcome.get("result")
+    result = _collapse_planned(outcome.get("result"))
     if stdout:
-        body["stdout"] = _truncate(str(stdout), limit)
+        body["stdout"] = cut(str(stdout))
     elif result is not None:
-        body["result"] = _truncate(result, limit) if isinstance(result, str) else _collapse_planned(result)
+        body["result"] = cut(result) if isinstance(result, str) else result
     elif len(action_results) == 1:
         body["result"] = _collapse_planned(action_results[0])
     elif action_results:
         body["result"] = {"action_calls": len(action_results),
                           "last_action_result": _collapse_planned(action_results[-1])}
-    return json.dumps(body, indent=2, default=str)
+    return json.dumps(cut.finish(body, tokens), indent=2, default=str)

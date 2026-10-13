@@ -404,9 +404,13 @@ def test_terminal_latch_stubs_later_actions_in_the_cell(tmp_path):
     assert len(game.calls) == 1
     tool = json.loads(agent.history[-1]["content"])
     stub, seen_in_cell = tool["result"]
+    assert list(stub) == ["executed", "action_num", "level", "score", "reward", "state", "valid_actions",
+                          "board_changed", "done", "level_completed", "game_over", "run_complete",
+                          "requested_count", "executed_count", "stopped_early", "stop_reason", "stop_detail"]
     assert stub["executed"] is False and stub["stop_reason"] == "previous_level_completed"
     assert stub["valid_actions"] == [] and stub["executed_count"] == 0 and stub["requested_count"] == 1
     assert stub["stopped_early"] is True and stub["level"] == 2 and stub["score"] == 1
+    assert stub["action_num"] == 1 and stub["reward"] == 0.0 and stub["level_completed"] is True
     assert seen_in_cell == stub  # the stub becomes last_action_result inside the cell
     assert set(tool) == {"tool", "returncode", "result"}
 
@@ -435,8 +439,9 @@ def test_tool_output_truncated(tmp_path):
     with FakeOpenAIServer([tool_call_response('print("z" * 9000)\naction("UP")')]) as server:
         agent = _agent(server)
         _analyze(agent, game)
-    stdout = json.loads(agent.history[-1]["content"])["stdout"]
-    assert stdout.startswith("z" * 4096) and "truncated 4904" in stdout
+    body = json.loads(agent.history[-1]["content"])
+    assert body["stdout"].startswith("z" * 4096) and body["stdout"].endswith("[truncated 4904 chars]")
+    assert body["truncated"] is True and "1024-token" in body["truncation_note"]
 
 
 def test_new_state_path_resets_session(tmp_path):
@@ -749,15 +754,44 @@ def test_tool_result_precedence():
 
 
 def test_compact_result_keys_and_defaults():
-    """F11: 13 base keys always (False/None defaults), executed_actions fallback, extras kept even when None."""
+    """F11/F11b: base keys always and in order; executed_actions only when there is something to show;
+    stop_reason/stop_detail/error only when truthy; timing keys whenever present."""
     error = agent_mod.compact_result({"executed": False, "error": "bad", "valid_actions": ["UP"],
                                       "run_elapsed_seconds": 1.23456, "time_remaining_seconds": None})
-    assert list(error)[:14] == list(agent_mod.COMPACT_KEYS)
-    assert error["done"] is False and error["level"] is None and error["executed_actions"] == []
+    assert list(error) == [*agent_mod.COMPACT_BASE_KEYS, "run_elapsed_seconds", "time_remaining_seconds", "error"]
+    assert error["done"] is False and error["level"] is None and "executed_actions" not in error
+    assert error["valid_actions"] == ["UP"] and error["action_display"] is None
     assert error["time_remaining_seconds"] is None and error["run_elapsed_seconds"] == 1.23456
-    assert "timing" not in error and "executed_count" not in error
-    single = agent_mod.compact_result({"executed": True, "action_display": "UP", "batch_size": 1, "stop_reason": None})
-    assert single["executed_actions"] == ["UP"] and single["stop_reason"] is None
+    assert agent_mod.compact_result({})["valid_actions"] == []
+    single = agent_mod.compact_result({"executed": True, "action_display": "UP", "requested_count": 1,
+                                       "stop_reason": None, "stop_detail": ""})
+    assert single["executed_actions"] == ["UP"] and "stop_reason" not in single and "stop_detail" not in single
+    assert "requested_count" not in single
+    named = agent_mod.compact_result({"executed": True, "action_name": "ACTION1"})
+    assert named["action_display"] == "ACTION1" and named["executed_actions"] == ["ACTION1"]
+    terminal = agent_mod.compact_result({"executed": False, "executed_actions": [], "stop_reason": "game_over"})
+    assert "executed_actions" not in terminal and terminal["stop_reason"] == "game_over"
+    blanks = agent_mod.compact_result({"executed": True, "executed_actions": [" ", ""], "action_display": "UP"})
+    assert blanks["executed_actions"] == []
+    batch = agent_mod.compact_result({"executed": True, "executed_actions": [" UP ", "DOWN"], "requested_count": 3,
+                                      "executed_count": 2, "stopped_early": 1, "stop_reason": "invalid_action"})
+    assert batch["executed_actions"] == ["UP", "DOWN"]
+    assert (batch["requested_count"], batch["executed_count"], batch["stopped_early"]) == (3, 2, True)
+    assert list(batch)[-4:] == ["requested_count", "executed_count", "stopped_early", "stop_reason"]
+    only_executed = agent_mod.compact_result({"executed": True, "executed_count": 2})
+    assert (only_executed["requested_count"], only_executed["stopped_early"]) == (2, False)
+
+
+def test_truncation_marks_the_payload_once():
+    """F16: each long field is cut with a note; truncated/truncation_note are added once, after all keys."""
+    out = json.loads(agent_mod.format_tool_result({"error": "e" * 300, "stdout": "s" * 400}, [], 256, 64))
+    assert out["error"] == "e" * 256 + "\n... [truncated 44 chars]"
+    assert out["stdout"].endswith("[truncated 144 chars]")
+    assert list(out)[-2:] == ["truncated", "truncation_note"] and out["truncated"] is True
+    assert "64-token" in out["truncation_note"]
+    short = json.loads(agent_mod.format_tool_result({"stdout": "ok"}, [], 256, 64))
+    assert "truncated" not in short and "truncation_note" not in short
+    assert agent_mod.tool_output_limit(1024) == 4096 and agent_mod.tool_output_limit(10) == 256
 
 
 # --------------------------------------------------------------------------- smaller original behaviours (F20)
