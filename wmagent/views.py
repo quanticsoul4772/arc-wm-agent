@@ -19,16 +19,25 @@ from typing import Any
 from wmagent.segmentation import ASCII_ALPHABET, segment, to_char_rows
 
 
-class AsciiFrameView:
+# The colour alphabet is module state (set by install_runtime), not per-view state, so that
+# dir() of a frame shows exactly the original's attribute set (behaviour note F15).
+_color_chars = ASCII_ALPHABET
 
-    def __init__(self, frame: dict[str, Any] | None, color_chars: str = ASCII_ALPHABET) -> None:
+
+class FrameView:
+    """A board. `ascii`, `step`, `level` and `shape` are plain writable attributes; only
+    `segmentation` is computed (lazily, cached in `_segmentation`)."""
+
+    def __init__(self, frame: dict[str, Any] | None, color_chars: str | None = None) -> None:
         frame = frame or {}
         grid = frame.get("grid") or []
         ascii_board = frame.get("ascii")
-        self._color_chars = color_chars
         self._grid = grid
-        self._ascii = ascii_board if isinstance(ascii_board, str) else None
         self._segmentation: dict | None = None
+        if isinstance(ascii_board, str):
+            self.ascii = ascii_board
+        else:
+            self.ascii = "\n".join(to_char_rows(grid, color_chars or _color_chars))
         self.step = frame.get("step")
         self.level = frame.get("level")
         shape = frame.get("shape")
@@ -41,20 +50,10 @@ class AsciiFrameView:
             self.shape = (len(rows), len(rows[0]) if rows else 0)
 
     @property
-    def ascii(self) -> str:
-        if self._ascii is None:
-            self._ascii = "\n".join(to_char_rows(self._grid, self._color_chars))
-        return self._ascii
-
-    @ascii.setter
-    def ascii(self, value: str) -> None:  # assignable, as in the original
-        self._ascii = value
-
-    @property
     def segmentation(self) -> dict:
         if self._segmentation is None:
             source = self._grid if self._grid else self.ascii
-            self._segmentation = segment(source, self._color_chars)
+            self._segmentation = segment(source, _color_chars)
         return self._segmentation
 
     def __repr__(self) -> str:
@@ -62,21 +61,16 @@ class AsciiFrameView:
         return f"AsciiFrameView(level={self.level}, step={self.step}, shape={rows}x{cols})"
 
 
-FrameView = AsciiFrameView
-
-
-class HistoryEntry:
-
+class HistoryEntryView:
     def __init__(self, action: str, frame: FrameView) -> None:
         self.action = action
         self.frame = frame
 
     def __repr__(self) -> str:
-        return f"HistoryEntry(action={self.action!r}, frame={self.frame!r})"
+        return f"AsciiHistoryEntryView(action={self.action!r}, frame={self.frame!r})"
 
 
 class TransitionView:
-
     def __init__(self, action: str, before_frame: FrameView | None, after_frame: FrameView, result: dict) -> None:
         self.action = action
         self.before_frame = before_frame
@@ -88,7 +82,8 @@ class TransitionView:
         return self.after_frame
 
     def __repr__(self) -> str:
-        return f"TransitionView(action={self.action!r}, before={self.before_frame!r}, after={self.after_frame!r})"
+        return (f"ActionTransitionView(action={self.action!r}, before_frame={self.before_frame!r}, "
+                f"after_frame={self.after_frame!r})")
 
 
 STATE_GLOBALS = (
@@ -139,7 +134,7 @@ class RuntimeState:
     def __init__(self, namespace: dict[str, Any], color_chars: str = ASCII_ALPHABET) -> None:
         self.namespace = namespace
         self.color_chars = color_chars
-        self.history: list[HistoryEntry] = []
+        self.history: list[HistoryEntryView] = []
         self.transitions: list[TransitionView] = []
         self.valid_actions: list[str] = []
         self.last_action_result: dict[str, Any] = {}
@@ -147,7 +142,7 @@ class RuntimeState:
     def load(self, state: dict[str, Any] | None) -> None:
         state = state or {}
         history = [
-            HistoryEntry(str(entry.get("action") or ""), FrameView(entry.get("frame"), self.color_chars))
+            HistoryEntryView(str(entry.get("action") or ""), FrameView(entry.get("frame"), self.color_chars))
             for entry in state.get("history") or []
         ]
         result = state.get("last_action_result")
@@ -198,6 +193,8 @@ def install_runtime(
     `request_actions(actions)` performs the actions and returns
     `(action_result, new_state_or_None)`; it raises to reject the request.
     """
+    global _color_chars
+    _color_chars = color_chars
     runtime = RuntimeState(namespace, color_chars)
     runtime.load(state)
 

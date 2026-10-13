@@ -1,6 +1,6 @@
 import pytest
 
-from wmagent.views import FrameView, HistoryEntry, TransitionView, install_runtime, normalize_actions
+from wmagent.views import FrameView, HistoryEntryView, TransitionView, install_runtime, normalize_actions
 
 
 def _frame(fill: int, step: int, level: int = 1) -> dict:
@@ -43,7 +43,7 @@ def test_segmentation_is_lazy_and_cached():
 def test_runtime_globals_follow_history():
     ns: dict = {}
     install_runtime(ns, _state(2), lambda actions: ({}, None))
-    assert isinstance(ns["history"][0], HistoryEntry)
+    assert isinstance(ns["history"][0], HistoryEntryView)
     assert [e.action for e in ns["history"]] == ["", "A1", "A2"]
     assert len(ns["transitions"]) == 2
     first, last = ns["transitions"]
@@ -149,3 +149,26 @@ def test_frame_view_repr_and_assignable_ascii():
     assert repr(frame) == "AsciiFrameView(level=2, step=1, shape=3x4)"
     frame.ascii = "custom"
     assert frame.ascii == "custom"
+
+
+def test_view_class_names_reprs_and_dir_sets():
+    """F15b: class names, str/repr texts and the non-dunder dir() sets of the original's views."""
+    ns: dict = {}
+    install_runtime(ns, _state(2), lambda actions: ({}, None))
+    frame, entry, transition = ns["current_frame"], ns["history"][1], ns["transitions"][0]
+    assert [type(x).__name__ for x in (frame, entry, transition)] == ["FrameView", "HistoryEntryView", "TransitionView"]
+    frame_text = repr(ns["history"][1].frame)
+    assert repr(entry) == str(entry) == f"AsciiHistoryEntryView(action='A1', frame={frame_text})"
+    assert repr(transition) == (
+        f"ActionTransitionView(action='A1', before_frame={ns['history'][0].frame!r}, after_frame={frame_text})"
+    )
+    assert str(frame) == repr(frame)
+
+    def public(obj):
+        return sorted(name for name in dir(obj) if not name.startswith("__"))
+
+    assert public(frame) == ["_grid", "_segmentation", "ascii", "level", "segmentation", "shape", "step"]
+    assert public(entry) == ["action", "frame"]
+    assert public(transition) == ["action", "after_frame", "before_frame", "frame", "result"]
+    frame.step = 99
+    assert frame.step == 99
