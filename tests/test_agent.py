@@ -217,11 +217,31 @@ def test_tool_call_markup_in_content_is_recovered(tmp_path):
 
 
 def test_recover_tool_calls_parsers():
-    xml = "<function=python><parameter=code>\nx = 1\n</parameter></function>"
+    """F9: only complete <tool_call><function=..>..</function></tool_call> blocks count, case-insensitive,
+    parameter values stripped; incomplete blocks and JSON bodies are not recovered or stripped."""
+    xml = "<TOOL_CALL>\n<Function=python>\n<parameter=code>\n  x = 1\n</parameter>\n</function> </tool_call>"
     assert recover_tool_calls(xml) == [{"name": "python", "arguments": {"code": "x = 1"}}]
-    js = '<tool_call>{"name": "python", "arguments": {"code": "y"}}</tool_call>'
-    assert recover_tool_calls(js) == [{"name": "python", "arguments": {"code": "y"}}]
+    assert recover_tool_calls("<function=python><parameter=code>x</parameter></function>") == []
+    assert recover_tool_calls('<tool_call>{"name": "python", "arguments": {"code": "y"}}</tool_call>') == []
     assert recover_tool_calls("<tool_call> nonsense") == []
+    assert agent_mod.strip_markup("keep <tool_call> open\n" + xml + "\n tail ") == "keep <tool_call> open\n tail"
+    assert agent_mod.MARKUP_DETECT.search("<TOOL_CALL ") is not None
+
+
+def test_markup_ids_count_per_response_reasoning_first(tmp_path):
+    """F9: a call in the reasoning and a different one in the content get ids markup-call-1 and -2."""
+    def block(code):
+        return f"<tool_call><function=python><parameter=code>{code}</parameter></function></tool_call>"
+
+    game = FakeGame(tmp_path)
+    reply = text_response("then " + block("y = 2"), reasoning="first " + block("x = 1"))
+    with FakeOpenAIServer([reply, error_response(503, "end")]) as server:
+        agent = _agent(server)
+        _analyze(agent, game)
+    assistant = server.requests[1]["messages"][2]
+    assert [c["id"] for c in assistant["tool_calls"]] == ["markup-call-1", "markup-call-2"]
+    assert [json.loads(c["function"]["arguments"])["code"] for c in assistant["tool_calls"]] == ["x = 1", "y = 2"]
+    assert assistant["reasoning"] == "first" and assistant["content"] == "then"
 
 
 def test_no_tool_call_gets_corrective_prompt(tmp_path):
@@ -572,10 +592,28 @@ def test_extract_notes_labels_bullets_continuations():
         "goal model: reach the yellow cell\n* Plan: UP x3\n1. Cross-level notes: timer bar on top\nunrelated"
     )
     notes = extract_notes(text)
-    assert notes["world"] == "red block moves with arrows walls are grey"  # collapsed to one line
+    # bullets (- and *) are removed, so the closing ** stays in the value; numbered lines are not labels
+    assert notes["world"] == "** red block moves with arrows walls are grey"
     assert notes["goal"] == "reach the yellow cell"
-    assert notes["plan"] == "UP x3"
-    assert notes["cross_level"] == "timer bar on top unrelated"
+    assert notes["plan"] == "UP x3 1. Cross-level notes: timer bar on top unrelated"
+    assert "cross_level" not in notes
+
+
+def test_extract_notes_original_rules():
+    """F17: blank lines do not end a label, repeated labels append, markup or a space before the colon
+    does not match, and the fallback labels fill only empty primaries."""
+    text = (
+        "World model: walls are grey\n\n  still the world\n**Goal model**: no match\nPlan : no match\n"
+        "World model (updated): no match\nWorld model: second part\n-*- Open questions:   what\tis\n  red?\n"
+        "Hypothesis: ignored because World model exists\nHistory check: fills findings\nNext test: fills plan"
+    )
+    notes = extract_notes(text)
+    assert notes["world"] == ("walls are grey still the world Goal model**: no match Plan : no match "
+                              "World model (updated): no match second part")
+    assert notes["questions"] == "what is red?"
+    assert notes["findings"] == "fills findings" and notes["plan"] == "fills plan"
+    assert extract_notes("Plan:\n\nHypothesis: h") == {"world": "h"}
+    assert extract_notes("intro only\nnothing labelled") == {}
 
 
 def test_notes_carried_then_cleared_on_level_transition(tmp_path):
@@ -884,3 +922,31 @@ def test_runtime_reminder_interleaves_the_global_names():
     for name in ("current_frame", "history", "transitions", "last_transition", "valid_actions",
                  "last_action_result", "action("):
         assert name in prompts.RUNTIME_REMINDER
+
+
+# --------------------------------------------------------------------------- base URL precedence (F20)
+
+
+@pytest.mark.parametrize(
+    "model, env, expected",
+    [
+        ("vrfai/Qwen3.6-27B-FP8", {"OPENAI_BASE_URL": "http://a:1/v1/", "LOCAL_ANALYZER_BASE_URL": "http://b:2/v1"},
+         ("http://a:1/v1", "vllm")),
+        ("vrfai/Qwen3.6-27B-FP8", {"LOCAL_ANALYZER_BASE_URL": "http://b:2/v1", "OPENAI_PROVIDER": "openai",
+                                   "LOCAL_ANALYZER_PROVIDER": "x"}, ("http://b:2/v1", "openai")),
+        ("vrfai/Qwen3.6-27B-FP8", {}, ("http://127.0.0.1:1234/v1", "vllm")),
+        ("vrfai/Qwen3.6-27B-FP8", {"OPENAI_BASE_URL": "", "LOCAL_ANALYZER_BASE_URL": "http://b:2/v1"}, ("", "vllm")),
+        ("qwen", {"OPENAI_BASE_URL": "http://a:1/v1", "LOCAL_ANALYZER_BASE_URL": "http://b:2/v1",
+                  "OPENAI_PROVIDER": "openai", "LOCAL_ANALYZER_PROVIDER": "sglang"}, ("http://b:2/v1", "sglang")),
+        ("Local", {"OPENAI_BASE_URL": "http://a:1/v1", "OPENAI_PROVIDER": "openai"},
+         ("http://127.0.0.1:1234/v1", "openai")),
+        ("m", {"OPENAI_BASE_URL": "http://host.docker.internal:8000/v1"}, ("http://127.0.0.1:8000/v1", "vllm")),
+    ],
+)
+def test_base_url_and_provider_precedence(model, env, expected):
+    assert agent_mod.resolve_endpoint(model, env) == expected
+
+
+def test_empty_base_url_is_rejected():
+    with pytest.raises(ValueError, match="base URL"):
+        ToolAgent(config=replace(CONFIG, base_url=""), gate=None, sandbox=(FakeSandbox(), FakeRefused))

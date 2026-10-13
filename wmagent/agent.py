@@ -61,11 +61,12 @@ class AgentConfig:
 
     @classmethod
     def from_env(cls) -> AgentConfig:
-        base = os.environ.get("LOCAL_ANALYZER_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "http://127.0.0.1:1234/v1"
+        model = _env("LOCAL_ANALYZER_MODEL_ID", "vrfai/Qwen3.6-27B-FP8")
+        base, provider = resolve_endpoint(model, os.environ)
         return cls(
-            base_url=base.rstrip("/"),
-            model=_env("LOCAL_ANALYZER_MODEL_ID", "vrfai/Qwen3.6-27B-FP8"),
-            provider=_env("LOCAL_ANALYZER_PROVIDER", "vllm"),
+            base_url=base,
+            model=model,
+            provider=provider,
             context_window=_env_num("LOCAL_ANALYZER_CONTEXT_WINDOW", 32768, int),
             max_output=_env_num("LOCAL_ANALYZER_MAX_OUTPUT", 0, int),
             tool_steps=_env_num("LOCAL_ANALYZER_TOOL_STEPS", 0, int),
@@ -92,6 +93,33 @@ class AgentConfig:
     @property
     def tool_output_chars(self) -> int:
         return tool_output_limit(self.tool_output_tokens)
+
+
+LOCAL_MODEL_PRESETS = frozenset({"local", "local-qwen", "qwen-local", "qwen"})
+DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
+
+
+def resolve_endpoint(model: str, env: Any) -> tuple[str, str]:
+    """Base URL and provider (behaviour note F20). A local preset model id reads the LOCAL_ANALYZER_*
+    variables; any other id prefers OPENAI_BASE_URL whenever it exists (even if empty) and OPENAI_PROVIDER."""
+    if model.strip().lower() in LOCAL_MODEL_PRESETS:
+        base = env.get("LOCAL_ANALYZER_BASE_URL") or DEFAULT_BASE_URL
+        provider = env.get("LOCAL_ANALYZER_PROVIDER") or env.get("OPENAI_PROVIDER") or "vllm"
+    else:
+        base = env["OPENAI_BASE_URL"] if "OPENAI_BASE_URL" in env else (
+            env.get("LOCAL_ANALYZER_BASE_URL") or DEFAULT_BASE_URL)
+        provider = env.get("OPENAI_PROVIDER") or env.get("LOCAL_ANALYZER_PROVIDER") or "vllm"
+    return _rewrite_docker_host(base.strip()).rstrip("/"), provider.strip()
+
+
+def _rewrite_docker_host(url: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if parts.hostname != "host.docker.internal":
+        return url
+    netloc = "127.0.0.1" + (f":{parts.port}" if parts.port else "")
+    return urlunsplit(parts._replace(netloc=netloc))
 
 
 SAFETY_TOKENS = 512
@@ -188,42 +216,20 @@ def clean_text(text: Any) -> str:
     return "\n".join(line for line in stripped.splitlines() if line.strip())
 
 
-MARKUP_DETECT = re.compile(r"<tool_call>|<function=", re.IGNORECASE)
-_XML_CALL = re.compile(
-    r"(?:<tool_call>\s*)?<function=([^>\s]+)\s*>(.*?)(?:</function>\s*(?:</tool_call>)?|(?=<function=)|$)",
-    re.DOTALL,
+MARKUP_DETECT = re.compile(r"<tool_call|<function=", re.IGNORECASE)
+# Only complete blocks are recovered and stripped (behaviour note F9); incomplete markup stays in the text.
+_COMPLETE_CALL = re.compile(
+    r"<tool_call>\s*<function=([^>]*)>(.*?)</function>\s*</tool_call>", re.DOTALL | re.IGNORECASE
 )
-_XML_PARAM = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)(?:</parameter>|(?=<parameter=)|$)", re.DOTALL)
-_JSON_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-_STRIP_MARKUP = re.compile(
-    r"<tool_call>.*?(?:</tool_call>|$)|<function=.*?(?:</function>|$)", re.DOTALL | re.IGNORECASE
-)
-
-
-def _param_value(raw: str) -> str:
-    value = raw.removeprefix("\n")
-    return value.removesuffix("\n")
+_PARAM = re.compile(r"<parameter=([^>]*)>(.*?)</parameter>", re.DOTALL | re.IGNORECASE)
 
 
 def recover_tool_calls(text: str) -> list[dict[str, Any]]:
-    """Tool calls written as text markup (qwen3-coder XML, or JSON inside <tool_call>)."""
-    calls: list[dict[str, Any]] = []
-    for name, body in _XML_CALL.findall(text or ""):
-        arguments = {key: _param_value(value) for key, value in _XML_PARAM.findall(body)}
-        calls.append({"name": name.strip(), "arguments": arguments})
-    if calls:
-        return calls
-    for blob in _JSON_CALL.findall(text or ""):
-        try:
-            parsed = json.loads(blob)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and parsed.get("name"):
-            arguments = parsed.get("arguments", {})
-            if isinstance(arguments, str):
-                arguments = _parse_arguments(arguments)
-            calls.append({"name": str(parsed["name"]), "arguments": arguments if isinstance(arguments, dict) else {}})
-    return calls
+    """Tool calls written as complete qwen3-coder XML blocks, in order of appearance."""
+    return [
+        {"name": name.strip(), "arguments": {key.strip(): value.strip() for key, value in _PARAM.findall(body)}}
+        for name, body in _COMPLETE_CALL.findall(text or "")
+    ]
 
 
 def _dedup_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -238,7 +244,7 @@ def _dedup_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def strip_markup(text: str) -> str:
-    return clean_text(_STRIP_MARKUP.sub("", text or ""))
+    return clean_text(_COMPLETE_CALL.sub("", text or "")).strip()
 
 
 def _parse_arguments(raw: Any) -> dict[str, Any]:
@@ -251,32 +257,47 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-_LABEL_LOOKUP = {label.lower(): key for key, label in prompts.NOTE_LABELS}
-_NOTE_LINE = re.compile(
-    r"^\s*(?:[-*+•>]+\s*|\d+[.)]\s*)?(?:\*\*|__)?\s*("
-    + "|".join(re.escape(label) for _, label in prompts.NOTE_LABELS)
-    + r")\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*)$",
-    re.IGNORECASE,
-)
+# Label text -> note key, primaries first, then the fallbacks (behaviour note F17).
+_PRIMARY_LABELS = [(label, key) for key, label in prompts.NOTE_LABELS]
+_FALLBACK_LABELS = [("Hypothesis", "world"), ("History check", "findings"), ("Next test", "plan")]
+
+
+def _strip_bullets(line: str) -> str:
+    line = line.strip()
+    while line[:1] in ("-", "*"):
+        line = line[1:].lstrip()
+    return line
 
 
 def extract_notes(text: str) -> dict[str, str]:
-    """Labelled note lines; continuation lines join the last label until a blank line."""
-    found: dict[str, list[str]] = {}
+    """Labelled notes from assistant content. A label line starts (after `-`/`*` bullets) with the label
+    immediately followed by `:`; other non-blank lines continue the current label, blank lines are skipped,
+    a repeated label appends, and each note is collapsed to one line. A fallback label fills its key only
+    when the primary label produced nothing."""
+    pieces: dict[str, list[str]] = {}
     current: str | None = None
-    for line in (text or "").splitlines():
-        match = _NOTE_LINE.match(line)
-        if match:
-            current = _LABEL_LOOKUP[match.group(1).lower()]
-            found[current] = [match.group(2).strip()] if match.group(2).strip() else []
+    for raw in (text or "").splitlines():
+        line = _strip_bullets(raw)
+        if not line:
             continue
-        if not line.strip():
-            current = None
-            continue
-        if current is not None:
-            found[current].append(line.strip())
-    # each note is collapsed to one line, as in the original
-    return {key: " ".join(lines) for key, lines in found.items() if lines}
+        lowered = line.lower()
+        for label, _key in (*_PRIMARY_LABELS, *_FALLBACK_LABELS):
+            if lowered.startswith(label.lower() + ":"):
+                current = label
+                rest = line[len(label) + 1:].strip()
+                pieces.setdefault(label, [])
+                if rest:
+                    pieces[label].append(rest)
+                break
+        else:
+            if current is not None:
+                pieces[current].append(line)
+    values = {label: " ".join(" ".join(parts).split()) for label, parts in pieces.items()}
+    notes = {key: values[label] for label, key in _PRIMARY_LABELS if values.get(label)}
+    for label, key in _FALLBACK_LABELS:
+        if values.get(label) and key not in notes:
+            notes[key] = values[label]
+    return notes
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> float:
@@ -399,7 +420,7 @@ def compact_result(payload: dict[str, Any]) -> dict[str, Any]:
     display = payload.get("action_display") or payload.get("action_name") or None
     compact: dict[str, Any] = {"executed": bool(payload.get("executed"))}
     compact.update({key: payload.get(key) for key in COMPACT_COPIED_KEYS})
-    compact["valid_actions"] = payload["valid_actions"] if "valid_actions" in payload else []
+    compact["valid_actions"] = payload.get("valid_actions", [])
     compact.update({key: bool(payload.get(key)) for key in COMPACT_FLAG_KEYS})
     compact["action_display"] = display
     executed_actions = payload.get("executed_actions")
@@ -537,6 +558,8 @@ class ToolAgent:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config or CONFIG
+        if not self.config.base_url:
+            raise ValueError("No analyzer base URL: OPENAI_BASE_URL is set but empty.")
         self.gate = WorldModelGate.from_env() if gate == "env" else gate
         self._sandbox = sandbox
         self.number_of_levels = number_of_levels

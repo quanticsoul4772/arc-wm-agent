@@ -18,7 +18,6 @@ from typing import Any
 
 from wmagent.segmentation import ASCII_ALPHABET, segment, to_char_rows
 
-
 # The colour alphabet is module state (set by install_runtime), not per-view state, so that
 # dir() of a frame shows exactly the original's attribute set (behaviour note F15).
 _color_chars = ASCII_ALPHABET

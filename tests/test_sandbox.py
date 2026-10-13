@@ -163,7 +163,16 @@ def test_other_imports_are_blocked(module):
     assert "ImportError" in out["error"] and module in out["error"]
 
 
-@pytest.mark.parametrize("name", ["open", "eval", "exec", "compile", "id", "globals", "input", "breakpoint"])
+def test_builtin_whitelist_is_the_original_53_names():
+    """F12: exactly the 53 names of the original (plus the guarded __import__)."""
+    assert len(sandbox.SAFE_BUILTIN_NAMES) == len(set(sandbox.SAFE_BUILTIN_NAMES)) == 53
+    assert set(sandbox._safe_builtins()) == {*sandbox.SAFE_BUILTIN_NAMES, "__import__"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["open", "eval", "exec", "compile", "id", "globals", "input", "breakpoint", "NotImplemented", "Ellipsis"],
+)
 def test_unsafe_builtins_are_missing(name):
     out = _run(f"{name}")
     assert out["error"].endswith(f"NameError: name '{name}' is not defined")

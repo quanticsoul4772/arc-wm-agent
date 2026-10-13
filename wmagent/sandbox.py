@@ -44,22 +44,14 @@ ALLOWED_MODULES = frozenset(
     }
 )
 
-# Matches the original's whitelist as far as the equivalence report describes it: no class machinery
-# (`__build_class__`, `object`, `property`, `staticmethod`, `classmethod`, `super`) and only four
-# exception names, so `class` statements and e.g. `except KeyError:` fail with NameError there too.
+# The original's whitelist, exactly 53 names (behaviour note F12), plus the guarded __import__. No class
+# machinery and only four exception names; NotImplemented and Ellipsis are not names either.
 SAFE_BUILTIN_NAMES = (
-    # numbers and conversion
-    "abs", "all", "any", "ascii", "bin", "bool", "chr", "complex", "divmod", "float", "format", "hex",
-    "int", "max", "min", "oct", "ord", "pow", "round", "sum",
-    # collections and iteration
-    "dict", "enumerate", "filter", "frozenset", "iter", "len", "list", "map", "next", "range",
-    "reversed", "set", "slice", "sorted", "str", "tuple", "zip", "bytes", "bytearray",
-    # introspection and output
-    "callable", "dir", "getattr", "hasattr", "hash", "isinstance", "issubclass", "print", "repr", "type",
-    # exceptions
-    "Exception", "RuntimeError", "TypeError", "ValueError",
-    # constants
-    "True", "False", "None", "NotImplemented", "Ellipsis",
+    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr", "complex", "dict",
+    "dir", "divmod", "enumerate", "Exception", "filter", "float", "format", "frozenset", "getattr", "hasattr",
+    "hash", "hex", "int", "isinstance", "issubclass", "iter", "len", "list", "map", "max", "min", "next", "oct",
+    "ord", "pow", "print", "range", "repr", "reversed", "round", "set", "slice", "sorted", "str", "sum", "tuple",
+    "TypeError", "type", "ValueError", "RuntimeError", "zip",
 )
 
 CPU_SLACK_SECONDS = 1
@@ -363,7 +355,8 @@ def _child_main() -> None:
     try:
         compiled = compile(request.get("code", ""), CODE_FILENAME, "exec")
         exec(compiled, namespace)  # noqa: S102 - running the model's code is the point
-    except BaseException as exc:  # noqa: BLE001 - report every failure of the model's code as text
+    except Exception as exc:  # noqa: BLE001 - report every failure of the model's code as text
+        # (a BaseException such as SystemExit ends the child; the host reports the generic exit error)
         send({"type": "error", "error": _format_user_error(exc), "stdout": captured.getvalue(),
               "action_results": _jsonable(action_results)})
         return
