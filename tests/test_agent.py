@@ -327,9 +327,57 @@ def test_remaining_tool_calls_skipped_after_action(tmp_path):
     ]}
     with FakeOpenAIServer([chat_body(message, "tool_calls")]) as server:
         agent = _agent(server)
+        agent._state_path = game.state_path
+        before = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "ok"}]
+        agent.history = list(before)
+        out = _analyze(agent, game)
+    assert out["step_executed"] and len(game.calls) == 1
+    # F8: call "b" was skipped, so the turn's history is reverted, as in the original
+    assert agent.history == before
+
+
+def test_history_persists_when_the_executing_call_is_the_last_one(tmp_path):
+    game = FakeGame(tmp_path)
+    message = {"content": "", "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "python", "arguments": json.dumps({"code": 'x = 1'})}},
+        {"id": "b", "type": "function", "function": {"name": "python", "arguments": json.dumps({"code": 'action("UP")'})}},
+    ]}
+    with FakeOpenAIServer([chat_body(message, "tool_calls")]) as server:
+        agent = _agent(server)
         _analyze(agent, game)
-    assert len(game.calls) == 1
-    assert [m.get("tool_call_id") for m in agent.history if m["role"] == "tool"] == ["a"]
+    assert [m.get("tool_call_id") for m in agent.history if m["role"] == "tool"] == ["a", "b"]
+
+
+def test_yield_with_skipped_calls_reverts_history(tmp_path):
+    game = FakeGame(tmp_path)
+    message = {"content": "", "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "python", "arguments": json.dumps({"code": 'x = 1'})}},
+        {"id": "b", "type": "function", "function": {"name": "python", "arguments": json.dumps({"code": 'y = 2'})}},
+    ]}
+    ticks = iter([0.0, 1.0, 61.0, 61.0, 61.0, 61.0])
+    with FakeOpenAIServer([chat_body(message, "tool_calls")]) as server:
+        agent = _agent(server, clock=lambda: next(ticks))
+        out = _analyze(agent, game)
+    assert out["yielded_control"] and agent.history == []
+
+
+def test_tool_call_markup_in_reasoning_is_recovered_and_deduplicated(tmp_path):
+    """F9: markup is looked for in the reasoning too, recovered from both texts, deduplicated and stripped."""
+    game = FakeGame(tmp_path)
+    markup = '<tool_call>\n<function=python>\n<parameter=code>\naction("DOWN")\n</parameter>\n</function>\n</tool_call>'
+    script = [text_response("Going down.\n" + markup, reasoning="I will move.\n" + markup)]
+    with FakeOpenAIServer(script) as server:
+        agent = _agent(server)
+        out = _analyze(agent, game)
+    assert out["step_executed"] and [c["actions"] for c in game.calls] == [[{"action": "DOWN"}]]
+    assistant = agent.history[1]
+    assert assistant["content"] == "Going down." and assistant["reasoning"] == "I will move."
+    assert [c["id"] for c in assistant["tool_calls"]] == ["markup-call-1"]
+
+    reasoning_only = FakeGame(tmp_path / "r")
+    with FakeOpenAIServer([text_response("", reasoning="plan\n" + markup)]) as server:
+        assert _analyze(_agent(server), reasoning_only)["step_executed"]
+    assert len(reasoning_only.calls) == 1
 
 
 def test_malformed_arguments_and_syntax_errors(tmp_path):
@@ -451,13 +499,39 @@ def test_estimate_formula_includes_tools():
     assert CONFIG.budget == 31744
 
 
-def test_thirty_assistant_cap_prepends_user():
+def test_thirty_assistant_cap_keeps_only_a_directly_preceding_user():
+    """F10: the user message is kept only when it directly precedes the cut."""
     messages = [_msg("system"), _msg("user", "turn")]
-    for i in range(35):
+    for i in range(5):
+        messages += [_msg("assistant", f"a{i}"), _msg("tool", f"t{i}")]
+    messages.append(_msg("user", "later"))
+    for i in range(5, 35):
         messages += [_msg("assistant", f"a{i}"), _msg("tool", f"t{i}")]
     kept = persistable_history(messages)
     assert sum(m["role"] == "assistant" for m in kept) == 30
-    assert kept[0] == _msg("user", "turn") and kept[1]["content"] == "a5"
+    assert kept[0] == _msg("user", "later") and kept[1]["content"] == "a5"
+
+
+def test_thirty_assistant_cap_drops_up_to_the_next_user():
+    """F10: a cut mid-exchange drops leading messages up to the next user message (none here)."""
+    messages = [_msg("system"), _msg("user", "turn")]
+    for i in range(35):
+        messages += [_msg("assistant", f"a{i}"), _msg("tool", f"t{i}")]
+    assert persistable_history(messages) == []
+    messages += [_msg("user", "next"), _msg("assistant", "z")]
+    kept = persistable_history(messages)
+    assert kept == [_msg("user", "next"), _msg("assistant", "z")]
+
+
+def test_persist_trims_to_the_budget_first():
+    """F10: the persisted history is trimmed to the budget before the cap."""
+    system = _msg("system", "s")
+    history = []
+    for i in range(6):
+        history += [_msg("user", f"u{i}" * 300), _msg("assistant", "a" * 900)]
+    budget = estimate_tokens([system, *history[-4:]]) + 1
+    assert persistable_history([system, *history], budget) == history[-4:]
+    assert persistable_history([system, *history]) == history
 
 
 def test_persist_drops_leading_non_user():

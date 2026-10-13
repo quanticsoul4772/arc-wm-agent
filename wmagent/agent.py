@@ -220,6 +220,17 @@ def recover_tool_calls(text: str) -> list[dict[str, Any]]:
     return calls
 
 
+def _dedup_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique = []
+    for call in calls:
+        key = json.dumps([call.get("name"), call.get("arguments")], sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            unique.append(call)
+    return unique
+
+
 def strip_markup(text: str) -> str:
     return clean_text(_STRIP_MARKUP.sub("", text or ""))
 
@@ -298,18 +309,19 @@ def trim_messages(messages: list[dict[str, Any]], budget: float) -> list[dict[st
     return [system, *_user_first(history)]
 
 
-def persistable_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """History to keep after a turn: no system, last 30 assistant messages, user-first."""
+def persistable_history(messages: list[dict[str, Any]], budget: float | None = None) -> list[dict[str, Any]]:
+    """History to keep after a turn: trimmed to the budget, no system, the last 30 assistant
+    messages. If the cut lands right after a user message, that message is kept too; otherwise
+    leading messages are dropped up to the next user message."""
+    if budget is not None and messages and messages[0].get("role") == "system":
+        messages = trim_messages(messages, budget)
     history = [m for m in messages if m.get("role") != "system"]
     assistant_positions = [i for i, m in enumerate(history) if m.get("role") == "assistant"]
     if len(assistant_positions) > MAX_PERSISTED_ASSISTANT:
         cut = assistant_positions[-MAX_PERSISTED_ASSISTANT]
-        kept = history[cut:]
-        if kept and kept[0].get("role") != "user":
-            before = [m for m in history[:cut] if m.get("role") == "user"]
-            if before:
-                kept = [before[-1], *kept]
-        history = kept
+        if cut > 0 and history[cut - 1].get("role") == "user":
+            cut -= 1
+        history = history[cut:]
     while history and history[0].get("role") != "user":
         history = history[1:]
     return history
@@ -478,6 +490,7 @@ class ToolAgent:
         self.max_level = 1
         self.turns = 0
         self._recovered_ids = 0
+        self._saved_history: list[dict[str, Any]] = []
         self._system_logged = False
 
     def sandbox(self) -> tuple[Callable[..., dict[str, Any]], type[Exception]]:
@@ -566,6 +579,7 @@ class ToolAgent:
             if self.gate is not None:
                 self.gate.reset(state_path)
         saved_history = list(self.history)
+        self._saved_history = saved_history
         try:
             return self._turn(state_path, action_count, [to_label(a) for a in valid_actions if str(a).upper() != "RESET"],
                               step_env, transcript, analysis_step, request_timeout, should_stop)
@@ -635,16 +649,25 @@ class ToolAgent:
             generated = self._account(reply["usage"])
             message = reply["message"]
             raw_content = message.get("content") or ""
-            reasoning = clean_text(message.get("reasoning") or message.get("reasoning_content") or "")
-            markup_seen = bool(MARKUP_DETECT.search(raw_content))
+            raw_reasoning = clean_text(message.get("reasoning") or message.get("reasoning_content") or "")
+            # Tool-call markup is looked for in both the reasoning and the content (as in the original),
+            # recovered from both (deduplicated) and stripped from both.
+            markup_in_reasoning = bool(MARKUP_DETECT.search(raw_reasoning))
+            markup_in_content = bool(MARKUP_DETECT.search(raw_content))
+            markup_seen = markup_in_reasoning or markup_in_content
             calls = [
                 {"id": call.get("id") or self._next_call_id(), "name": (call.get("function") or {}).get("name", ""),
                  "arguments": _parse_arguments((call.get("function") or {}).get("arguments"))}
                 for call in message.get("tool_calls") or []
             ]
             if not calls and markup_seen:
-                calls = [{"id": self._next_call_id(), **call} for call in recover_tool_calls(raw_content)]
-            visible = strip_markup(raw_content) if markup_seen else clean_text(raw_content)
+                calls = [
+                    {"id": f"markup-call-{index}", **call}
+                    for index, call in enumerate(_dedup_calls(
+                        recover_tool_calls(raw_reasoning) + recover_tool_calls(raw_content)), start=1)
+                ]
+            visible = strip_markup(raw_content) if markup_in_content else clean_text(raw_content)
+            reasoning = strip_markup(raw_reasoning) if markup_in_reasoning else raw_reasoning
             self._log(transcript, "RESPONSE META", json.dumps(
                 {"finish_reason": reply["finish_reason"], "generated_tokens": generated, "tool_calls": len(calls)}))
             if reasoning:
@@ -666,16 +689,20 @@ class ToolAgent:
                 continue
 
             messages.append(self._assistant_message(visible, reasoning, calls))
-            for call in calls:
+            for index, call in enumerate(calls):
                 self._log(transcript, "TOOL CALL", f"{call['name']}: {json.dumps(call['arguments'])}")
                 output = self._run_tool(call, ctx)
                 self._log(transcript, "TOOL RESULT", output)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
+                # If later calls of this response get skipped, the turn's history is not persisted
+                # (the original reverts it), so no assistant message with unanswered tool_calls is kept.
+                skipped = index < len(calls) - 1
                 if ctx.executed_any:
-                    return self._finish_turn(messages, ctx, reasoning_seen, transcript)
+                    return self._finish_turn(messages, ctx, reasoning_seen, transcript, persist=not skipped)
                 reason = yield_reason()
                 if reason:
-                    return self._finish_turn(messages, ctx, reasoning_seen, transcript, yielded=reason)
+                    return self._finish_turn(messages, ctx, reasoning_seen, transcript, yielded=reason,
+                                             persist=not skipped)
 
     def _next_call_id(self) -> str:
         self._recovered_ids += 1
@@ -694,8 +721,12 @@ class ToolAgent:
             ]
         return message
 
-    def _finish_turn(self, messages, ctx: _TurnContext, reasoning_seen, transcript, yielded: str | None = None):
-        self.history = persistable_history(messages)
+    def _finish_turn(self, messages, ctx: _TurnContext, reasoning_seen, transcript, yielded: str | None = None,
+                     persist: bool = True):
+        if persist:
+            self.history = persistable_history(messages, self.config.budget)
+        else:
+            self.history = list(self._saved_history)
         if ctx.results:
             self.last_summary = summarize(ctx.results, ctx.start_level)
             self.last_action_result = ctx.results[-1]
