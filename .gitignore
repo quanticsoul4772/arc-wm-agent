@@ -1,0 +1,5 @@
+.corpus_cells.jsonl
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

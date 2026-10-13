@@ -37,9 +37,10 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 PREDICT_PATTERN = re.compile(r"^def predict\(", re.MULTILINE)
 
@@ -97,10 +98,10 @@ def extract_definitions(code: str) -> dict[str, str] | None:
             definitions[node.name] = segment
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             definitions[f"import:{segment}"] = segment
-        elif isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets):
-            if not any(isinstance(n, ast.Call) for n in ast.walk(node.value)):
-                for target in node.targets:
-                    definitions[f"const:{target.id}"] = segment
+        elif (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)
+              and not any(isinstance(n, ast.Call) for n in ast.walk(node.value))):
+            for target in node.targets:
+                definitions[f"const:{target.id}"] = segment
     return definitions if "predict" in definitions else None
 
 
@@ -178,7 +179,7 @@ class WorldModelGate:
     confirmed: bool = False
 
     @classmethod
-    def from_env(cls) -> "WorldModelGate | None":
+    def from_env(cls) -> WorldModelGate | None:
         if os.environ.get("PROBE_ENFORCE", "").strip() != "1":
             return None
         return cls(

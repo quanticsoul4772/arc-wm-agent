@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from inference.agent.python_tool_sandbox import ActionRefused, run_sandboxed_python
-from inference.agent.world_model_gate import (
+from wmagent.sandbox import ActionRefused, run_sandboxed_python
+from wmagent.world_model_gate import (
     BACKTEST_DRIVER,
     WorldModelGate,
     cell_mismatch,
@@ -146,7 +146,7 @@ def test_small_changes_are_informative(tmp_path: Path):
 
 
 def test_skeleton_is_seeded_and_cannot_pass(tmp_path: Path):
-    from inference.agent.world_model_gate import SKELETON_PREDICT
+    from wmagent.world_model_gate import SKELETON_PREDICT
 
     gate = WorldModelGate(probe_actions=2, max_refusals=2)
     gate.reset(tmp_path / "s_p0_tool_runtime_state.json")
@@ -207,23 +207,24 @@ def test_backtest_error_is_logged(tmp_path: Path):
     assert events[-1]["event"] == "backtest_error"
 
 
-def test_kaggle_setup_script_carries_probe_settings(monkeypatch):
-    from inference.framework.kaggle import duck_kaggle_setup_command
+def test_kaggle_env_carries_probe_settings():
+    from wmagent.kaggle.build import agent_env, parse_args
 
-    monkeypatch.setenv("PROBE_ENFORCE", "1")
-    monkeypatch.setenv("PROBE_ACTIONS", "15")
-    script = duck_kaggle_setup_command()
-    assert "'PROBE_ENFORCE': '1'" in script
-    assert "'PROBE_ACTIONS': '15'" in script
-    assert "'PROBE_MAX_REFUSALS': '8'" in script
+    env = agent_env(parse_args(["--out", "o", "--label", "t", "--probe-enforce", "1", "--probe-actions", "15"]))
+    assert env["PROBE_ENFORCE"] == "1"
+    assert env["PROBE_ACTIONS"] == "15"
+    assert env["PROBE_MAX_REFUSALS"] == "8"
 
 
-def test_kaggle_setup_script_defaults_probe_off(monkeypatch):
-    from inference.framework.kaggle import duck_kaggle_setup_command
+def test_kaggle_env_defaults_to_the_gate_on_method():
+    from wmagent.kaggle.build import agent_env, parse_args
 
-    monkeypatch.delenv("PROBE_ENFORCE", raising=False)
-    script = duck_kaggle_setup_command()
-    assert "'PROBE_ENFORCE': '0'" in script
+    env = agent_env(parse_args(["--out", "o", "--label", "t"]))
+    assert env["PROBE_ENFORCE"] == "1"
+    assert env["PROBE_ACTIONS"] == "8"
+    assert env["PROBE_RELEASE_AFTER_ACCEPT"] == "0"
+    assert env["PROBE_OPTIONAL"] == "0"
+    assert agent_env(parse_args(["--out", "o", "--label", "t", "--probe-enforce", "0"]))["PROBE_ENFORCE"] == "0"
 
 
 MEMORIZING_PREDICT = '''
@@ -305,13 +306,11 @@ def test_default_gate_still_refuses_on_a_new_level(tmp_path: Path):
     assert gate.check_action(1) is not None
 
 
-def test_kaggle_setup_script_carries_release_setting(monkeypatch):
-    from inference.framework.kaggle import duck_kaggle_setup_command
+def test_kaggle_env_carries_release_setting():
+    from wmagent.kaggle.build import agent_env, parse_args
 
-    monkeypatch.setenv("PROBE_RELEASE_AFTER_ACCEPT", "1")
-    assert "'PROBE_RELEASE_AFTER_ACCEPT': '1'" in duck_kaggle_setup_command()
-    monkeypatch.delenv("PROBE_RELEASE_AFTER_ACCEPT")
-    assert "'PROBE_RELEASE_AFTER_ACCEPT': '0'" in duck_kaggle_setup_command()
+    assert agent_env(parse_args(["--out", "o", "--label", "t", "--probe-release-after-accept", "1"]))["PROBE_RELEASE_AFTER_ACCEPT"] == "1"
+    assert agent_env(parse_args(["--out", "o", "--label", "t"]))["PROBE_RELEASE_AFTER_ACCEPT"] == "0"
 
 
 def _optional_gate(tmp_path: Path, name: str) -> WorldModelGate:
@@ -364,10 +363,8 @@ def test_confirmation_resets_on_level_change(tmp_path: Path):
     assert not gate.confirmed
 
 
-def test_kaggle_setup_script_carries_optional_setting(monkeypatch):
-    from inference.framework.kaggle import duck_kaggle_setup_command
+def test_kaggle_env_carries_optional_setting():
+    from wmagent.kaggle.build import agent_env, parse_args
 
-    monkeypatch.setenv("PROBE_OPTIONAL", "1")
-    assert "'PROBE_OPTIONAL': '1'" in duck_kaggle_setup_command()
-    monkeypatch.delenv("PROBE_OPTIONAL")
-    assert "'PROBE_OPTIONAL': '0'" in duck_kaggle_setup_command()
+    assert agent_env(parse_args(["--out", "o", "--label", "t", "--probe-optional", "1"]))["PROBE_OPTIONAL"] == "1"
+    assert agent_env(parse_args(["--out", "o", "--label", "t"]))["PROBE_OPTIONAL"] == "0"
