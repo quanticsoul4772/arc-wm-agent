@@ -665,7 +665,7 @@ def test_notes_carried_then_cleared_on_level_transition(tmp_path):
         _analyze(agent, game, 1)
         assert agent.notes == {"world": "marker moves", "plan": "go up", "cross_level": "levels take 2 moves"}
         _analyze(agent, game, 2)
-        assert agent.last_summary["level_transition"]
+        assert agent.last_summary["level_progressed"]
         assert agent.notes == {"cross_level": "levels take 2 moves"}
         _analyze(agent, game, 3)
     second_prompt = server.requests[1]["messages"][-1]["content"][0]["text"]
@@ -863,6 +863,9 @@ def test_truncation_marks_the_payload_once():
     assert out["stdout"].endswith("[truncated 144 chars]")
     assert list(out)[-2:] == ["truncated", "truncation_note"] and out["truncated"] is True
     assert "64-token" in out["truncation_note"]
+    # same serialised length as the original's note (report round 7: it counts toward eviction)
+    note = json.loads(agent_mod.format_tool_result({"stdout": "s" * 5000}, [], 4096, 1024))["truncation_note"]
+    assert len(json.dumps(note)) - 2 == 71
     short = json.loads(agent_mod.format_tool_result({"stdout": "ok"}, [], 256, 64))
     assert "truncated" not in short and "truncation_note" not in short
     assert agent_mod.tool_output_limit(1024) == 4096 and agent_mod.tool_output_limit(10) == 256
@@ -911,9 +914,9 @@ ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (repor
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
-# Rewrite serialised sizes after round-6 tuning: first turn, later turn without notes, a one-line notes
+# Rewrite serialised sizes after round-7 tuning (a MOUSE game): first turn, later turn without notes, a one-line notes
 # block, corrective. The D2 per-template means they produce are within +/-5 chars of the original's.
-PINNED_TEMPLATE_SIZES = [2806, 2914, 148, 1249]
+PINNED_TEMPLATE_SIZES = [2817, 2918, 148, 1249]
 
 
 def _near(value, target, tolerance=0.10):
@@ -967,9 +970,9 @@ def test_previous_turn_summary_conveys_the_original_facts_only():
     assert "executed 0 actions: none." in _facts({**base, "executed_count": 0, "executed_actions": []})
     many = _facts({**base, "executed_count": 14, "executed_actions": [f"A{i}" for i in range(14)]})
     assert "A9, ... (first 10 of 14 shown)." in many and "A10" not in many
-    assert _facts({**base, "level_progressed": True, "level_transition": True}).endswith(prompts.OUTCOME_NEW_LEVEL)
+    assert _facts({**base, "level_progressed": True}).endswith(prompts.OUTCOME_NEW_LEVEL)
     # a changed level number without a completed-level result is not "a new level"
-    assert _facts({**base, "level_transition": True}).endswith(prompts.OUTCOME_SAME_LEVEL)
+    assert _facts({**base, "level": 3}, level=3, max_level_seen=3).endswith(prompts.OUTCOME_SAME_LEVEL)
     assert _facts({**base, "run_complete": True, "level_progressed": True}).endswith(prompts.OUTCOME_RUN_COMPLETE)
     assert _facts({**base, "game_over": True}).endswith(prompts.SAME_LEVEL_GAME_OVER)
     assert _facts({**base, "game_over": True, "level_progressed": True}).endswith(
@@ -982,6 +985,35 @@ def test_previous_turn_summary_conveys_the_original_facts_only():
                                                  "state": "NOT_FINISHED"})
     for absent in ("invalid_action", "NOT_FINISHED", "Turn ", "Stopped early", "board changed", "#"):
         assert absent not in full
+
+
+def test_mouse_arguments_sentence_only_when_mouse_is_valid():
+    """Round 7: the MOUSE-coordinates sentence appears only when MOUSE is a valid action, as in the original."""
+    with_mouse = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP", "MOUSE"], notes={},
+                                     previous_summary=None)
+    without = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP", "DOWN"], notes={},
+                                  previous_summary=None)
+    assert prompts.MOUSE_ARGUMENTS in with_mouse and prompts.MOUSE_ARGUMENTS not in without
+    assert "Labels other than MOUSE take no arguments." in without
+
+
+def test_notes_survive_a_level_number_change_without_level_completed(tmp_path):
+    """Round 7: notes clear only on level_completed / run_complete / game_over, not on a bare level change."""
+    game = FakeGame(tmp_path)
+    real_step_env = game.step_env
+
+    def step_env(arguments):  # the level number moves but no result reports level_completed
+        payload = real_step_env(arguments)
+        game.level += 1
+        payload["level"] = game.level
+        return payload
+
+    with FakeOpenAIServer([tool_call_response('action("UP")', content="World model: kept")]) as server:
+        agent = _agent(server)
+        agent.analyze(state_path=game.state_path, action_count=0, valid_actions=["ACTION1"], step_env=step_env,
+                      transcript_path=None, analysis_step=1, request_timeout=5.0, should_stop=lambda: False)
+    assert agent.last_summary["level"] == 2 and not agent.last_summary["level_progressed"]
+    assert agent.notes == {"world": "kept"}
 
 
 def test_template_sizes_are_pinned():

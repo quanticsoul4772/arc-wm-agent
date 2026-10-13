@@ -284,12 +284,13 @@ MAX_LISTED_LABELS = 10
 # board change, state name or action-number span).
 SUMMARY_COUNT = "Your last turn executed {count} {noun}: {labels}."
 OUTCOME_RUN_COMPLETE = "That finished the whole game."
-OUTCOME_NEW_LEVEL = "You finished a level; new one."
+OUTCOME_NEW_LEVEL = "You completed a level; a new one."
 OUTCOME_SAME_LEVEL = "You are still on the same level."
 GAME_OVER_FACT = "It ended in GAME_OVER and the level was restarted."
 # GAME_OVER while still on the same level: one combined sentence, as the original combines them.
-SAME_LEVEL_GAME_OVER = "GAME_OVER; same level was restarted."
-NOTHING_EXECUTED = "No action has been executed yet in this game."
+SAME_LEVEL_GAME_OVER = "GAME_OVER; still on the same level, which restarted."
+MOUSE_ARGUMENTS = "MOUSE needs integer row and col, each 0 to 63, top row 0."
+NOTHING_EXECUTED = "No action has been executed so far in this new game."
 NOTHING_CAPTURED = "No previous action sequence was captured."
 
 
@@ -392,11 +393,11 @@ def user_prompt(
     else:
         facts = NOTHING_EXECUTED if first_turn else NOTHING_CAPTURED
     lines = [f"{header} {facts}"]
-    lines.append(
-        f"Labels accepted right now: {', '.join(valid_actions) if valid_actions else 'none'}. MOUSE needs "
-        "integer row and col (0 to 63, row 0 at the top); the other labels take no arguments. The harness "
-        "handles RESET after GAME_OVER on its own."
-    )
+    labels_line = f"Labels accepted right now: {', '.join(valid_actions) if valid_actions else 'none'}."
+    if "MOUSE" in valid_actions:  # only when clicks are possible, as in the original
+        labels_line += " " + MOUSE_ARGUMENTS
+    lines.append(labels_line + " Labels other than MOUSE take no arguments. The harness handles RESET after "
+                 "GAME_OVER on its own.")
     lines.append(RUNTIME_REMINDER)
     carried = render_notes(notes)
     if carried:

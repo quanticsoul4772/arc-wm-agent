@@ -508,8 +508,7 @@ class _Truncator:
         if self.cut:
             body["truncated"] = True
             body["truncation_note"] = (
-                f"Part of this output was cut off so the reply stays within the roughly {tokens}-token "
-                "budget for tool output."
+                f"Output was cut off to stay within the roughly {tokens}-token output budget."
             )
         return body
 
@@ -837,9 +836,10 @@ class ToolAgent:
         else:
             self.history = list(self._saved_history)
         if ctx.results:
-            self.last_summary = summarize(ctx.results, ctx.start_level)
+            self.last_summary = summarize(ctx.results)
             self.last_action_result = ctx.results[-1]
-            if any(self.last_summary.get(flag) for flag in ("level_transition", "run_complete", "game_over")):
+            # cleared only on level_completed / run_complete / game_over, as in the original
+            if any(self.last_summary.get(flag) for flag in ("level_progressed", "run_complete", "game_over")):
                 for key in prompts.LEVEL_SCOPED_NOTES:
                     self.notes.pop(key, None)
         reasoning = "\n".join(reasoning_seen)
@@ -964,11 +964,9 @@ class _TurnContext:
         self.state_path = state_path
         self.results: list[dict[str, Any]] = []
         self.executed_any = False
-        runtime = load_runtime_state(state_path)
-        self.start_level = int((runtime.get("current_frame") or {}).get("level") or 1)
 
 
-def summarize(results: list[dict[str, Any]], start_level: int) -> dict[str, Any]:
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     labels: list[str] = []
     for result in results:
         executed = result.get("executed_actions")
@@ -984,9 +982,6 @@ def summarize(results: list[dict[str, Any]], start_level: int) -> dict[str, Any]
         "level": last.get("level"),
         # prompt fact: a new level only when an action reported completing one
         "level_progressed": any(r.get("level_completed") for r in results),
-        # notes clearing also reacts to a changed level number
-        "level_transition": any(r.get("level_completed") for r in results)
-        or (last.get("level") is not None and last.get("level") != start_level),
         "run_complete": any(r.get("run_complete") for r in results),
         "game_over": any(r.get("game_over") for r in results),
     }
