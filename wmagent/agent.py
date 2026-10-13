@@ -103,7 +103,8 @@ def resolve_endpoint(model: str, env: Any) -> tuple[str, str]:
     """Base URL and provider (behaviour note F20). A local preset model id reads the LOCAL_ANALYZER_*
     variables; any other id prefers OPENAI_BASE_URL whenever it exists (even if empty) and OPENAI_PROVIDER."""
     if model.strip().lower() in LOCAL_MODEL_PRESETS:
-        base = env.get("LOCAL_ANALYZER_BASE_URL") or DEFAULT_BASE_URL
+        # set-but-empty is taken as is (and rejected at construction), as in the original
+        base = env.get("LOCAL_ANALYZER_BASE_URL", DEFAULT_BASE_URL)
         provider = env.get("LOCAL_ANALYZER_PROVIDER") or env.get("OPENAI_PROVIDER") or "vllm"
     else:
         base = env["OPENAI_BASE_URL"] if "OPENAI_BASE_URL" in env else (
@@ -562,7 +563,7 @@ class ToolAgent:
     ) -> None:
         self.config = config or CONFIG
         if not self.config.base_url:
-            raise ValueError("No analyzer base URL: OPENAI_BASE_URL is set but empty.")
+            raise ValueError("No analyzer base URL: the base-URL variable in use is set but empty.")
         self.gate = WorldModelGate.from_env() if gate == "env" else gate
         self._sandbox = sandbox
         self.number_of_levels = number_of_levels
