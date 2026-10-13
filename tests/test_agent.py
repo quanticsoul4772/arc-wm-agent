@@ -911,6 +911,9 @@ ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (repor
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
+# Rewrite serialised sizes after round-5 tuning: first turn, later turn without notes, a one-line notes
+# block, corrective. The D2 per-template means they produce are within +/-5 chars of the original's.
+PINNED_TEMPLATE_SIZES = [2814, 2917, 148, 1249]
 
 
 def _near(value, target, tolerance=0.10):
@@ -939,6 +942,47 @@ def test_prompt_sizes_are_close_to_the_original():
 
 def _words(text):
     return " ".join("".join(ch if ch.isalnum() else " " for ch in text.lower()).split())
+
+
+def _serialised(text):
+    return len(json.dumps(text, ensure_ascii=True))
+
+
+def test_turn_events_barely_change_the_user_prompt_size():
+    """Round-5 sizes: the original's later-turn prompt is nearly the same size after a level change, a halted
+    batch or GAME_OVER, so the summary uses a fixed-shape status line (only yes/no values change)."""
+    labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
+    base = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "start_action_num": 14, "end_action_num": 15,
+            "level": 2, "state": "NOT_FINISHED", "board_changed": True}
+
+    def size(**summary):
+        return _serialised(prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15,
+                                               valid_actions=labels, notes={}, previous_summary={**base, **summary},
+                                               first_turn=False))
+
+    plain = size()
+    assert 0 < size(level_transition=True, stop_reason="level_completed") - plain <= 2
+    assert 0 < size(game_over=True, stop_reason="game_over") - plain <= 2
+    text = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels, notes={},
+                               previous_summary={**base, "level_transition": True}, first_turn=False)
+    assert "Level changed: yes. GAME_OVER: no. Game complete: no. Stopped early: no." in text
+
+
+def test_template_sizes_are_pinned():
+    """Serialised sizes tuned to the original's per-template means (report round 5, within +/-5 chars);
+    a wording change must re-measure against the original before this pin is updated."""
+    labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
+    summary = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "start_action_num": 14,
+               "end_action_num": 15, "level": 2, "state": "NOT_FINISHED", "board_changed": True}
+    first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels, notes={},
+                                previous_summary=None, first_turn=True)
+    later = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
+                                notes={}, previous_summary=summary, first_turn=False)
+    with_notes = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
+                                     notes={"plan": "p"}, previous_summary=summary, first_turn=False)
+    sizes = [_serialised(first), _serialised(later), _serialised(with_notes) - _serialised(later),
+             _serialised(prompts.corrective_prompt(False))]
+    assert sizes == PINNED_TEMPLATE_SIZES
 
 
 def test_identifier_lists_are_not_in_canonical_order():

@@ -292,14 +292,15 @@ def _summary_text(summary: dict[str, Any] | None) -> str:
             f"board {'changed' if summary.get('board_changed') else 'did not change'}."
         ),
     ]
-    if summary.get("level_transition"):
-        parts.append("The level changed: the board is a new layout, so survey it again before reusing old ideas.")
-    if summary.get("run_complete"):
-        parts.append("The game is complete.")
-    if summary.get("game_over"):
-        parts.append("That move ended in GAME_OVER; the harness restarted the level.")
-    if summary.get("stop_reason"):
-        parts.append(f"The list of moves halted early ({summary['stop_reason']}).")
+    # A fixed-shape status line rather than optional sentences: the original's per-turn prompt size barely
+    # depends on these events, and eviction depends on prompt size (report round 5).
+    def yes_no(key: str) -> str:
+        return "yes" if summary.get(key) else "no"
+
+    parts.append(
+        f"Level changed: {yes_no('level_transition')}. GAME_OVER: {yes_no('game_over')}. "
+        f"Game complete: {yes_no('run_complete')}. Stopped early: {yes_no('stop_reason')}."
+    )
     return " ".join(parts)
 
 
@@ -316,8 +317,8 @@ RUNTIME_REMINDER = (
 _FIRST_TURN_GUIDE = """This is the opening turn and no actions have been played yet. The attached image shows the \
 current board. For this turn:
 1. Survey the board with python, starting from `current_frame.segmentation`: list the background colours, \
-the small objects, shapes that repeat, and any bars or counters along the edges.
-2. Print ASCII only for small windows around the objects you want to inspect closely.
+small objects, repeated shapes, and bars or counters along the edges.
+2. Print ASCII only for small windows around objects you want to inspect closely.
 3. Write a first version of every labelled line, from Goal model and World model through Plan, Action \
 model, Open questions, Recent findings and Cross-level notes, marking guesses as guesses.
 4. Choose the single action whose outcome would teach you the most, play it with action(...) at the end \
@@ -329,15 +330,15 @@ you how many moves you have or how close you are to finishing, and they are easy
 
 _LATER_TURN_GUIDE = """For this turn:
 1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
-changes as objects moving, appearing, vanishing or changing colour rather than as raw cells.
+changes as objects moving, appearing, vanishing or changing colour, not as raw cells.
 2. Compare the outcome with what your Plan expected. Where it differs, record that in Recent findings and \
-correct the World model or the Action model. Say which part of the old picture the surprise contradicts.
+correct the World model or the Action model.
 3. If the level changed, survey the new board through the segmentation before reusing old assumptions.
 4. If a move had no visible effect, note the label and position so you do not repeat it, and check whether \
-only an edge counter or bar changed.
+only an edge counter changed.
 5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture.
 6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
-is reliable, and state the outcome you expect. Stop after any result with level_completed, game_over, \
+is reliable, saying what you expect. Stop after any result with level_completed, game_over, \
 run_complete or done set, and look at the new board before playing anything else."""
 
 
@@ -377,13 +378,16 @@ def user_prompt(
     lines.append(RUNTIME_REMINDER)
     carried = render_notes(notes)
     if carried:
-        lines.append("Your labelled notes from earlier replies (revise them in this reply):\n" + carried)
+        lines.append(
+            "Your labelled notes, carried over from your earlier replies. Check each line against the current board "
+            "and revise them in this reply:\n" + carried
+        )
     lines.append(_FIRST_TURN_GUIDE if first_turn else _LATER_TURN_GUIDE)
     lines.append(_TURN_REMINDERS)
     return "\n\n".join(lines)
 
 
-_CORRECTIVE_BODY = """Every turn has to end with at least one real move played from inside a python cell. \
+_CORRECTIVE_BODY = """Every turn has to end with at least one real move played from a python cell. \
 Please continue like this:
 1. Call the python tool to look at the current state. Start from current_frame.segmentation and from the \
 difference between previous_frame and current_frame instead of printing the whole board.
