@@ -492,6 +492,35 @@ def test_block_drop_rule():
     assert drop_oldest_block([_msg("user")]) == [_msg("user")]
 
 
+def test_trim_without_a_user_message_sends_the_system_message_alone():
+    """F22: when the trim evicts the turn's own user message and no user message is left, the
+    user-first step empties the history, as in the original: the request is [system] alone."""
+    system = _msg("system", "s")
+    history = [_msg("user", "u" * 3000), _msg("assistant", "a" * 3000), _msg("tool", "t" * 600)]
+    budget = estimate_tokens([system, history[-1]]) + 200
+    assert trim_messages([system, *history], budget) == [system]
+    # within budget nothing is dropped, and a history that starts mid-exchange is still cut to its first user
+    assert trim_messages([system, *history], 10**6) == [system, *history]
+    assert trim_messages([system, _msg("tool"), *history], 10**6) == [system, *history]
+
+
+def test_over_long_turn_degrades_to_system_only_requests(tmp_path):
+    """F22 end to end: a large tool result pushes the turn's user message out; the next request is
+    [system] alone and the turn persists an empty history."""
+    game = FakeGame(tmp_path)
+    script = [tool_call_response('print("z" * 15000)'), tool_call_response('action("UP")')]
+    with FakeOpenAIServer(script) as server:
+        agent = _agent(server, tool_output_tokens=4000)
+        system_tokens = int(estimate_tokens([{"role": "system", "content": agent.system_prompt}]))
+        agent.config = replace(agent.config, context_window=agent.config.reply_reserve + 512 + system_tokens + 3000)
+        out = _analyze(agent, game)
+    assert out["step_executed"]
+    first, second = (r["messages"] for r in server.requests)
+    assert _roles(first) == ["system", "user"]
+    assert _roles(second) == ["system"]
+    assert agent.history == []
+
+
 def test_trim_respects_budget_and_user_first():
     system = _msg("system", "s")
     history = []

@@ -327,8 +327,10 @@ def drop_oldest_block(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _user_first(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop leading messages up to the first user message. With no user message left this empties the
+    history, so the request carries the system message alone (as in the original, report F22)."""
     start = 0
-    while start < len(history) - 1 and history[start].get("role") != "user":
+    while start < len(history) and history[start].get("role") != "user":
         start += 1
     return history[start:]
 
