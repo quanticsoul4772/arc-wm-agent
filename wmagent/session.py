@@ -37,6 +37,9 @@ LABEL_TO_ENGINE: dict[str, GameAction] = {
     "RESET": GameAction.RESET,
 }
 ENGINE_TO_LABEL: dict[GameAction, str] = {engine: label for label, engine in LABEL_TO_ENGINE.items()}
+# Engine names step_env accepts as-is. ACTION7 (and anything else) is not mapped, as in the original:
+# it stays listed in valid_actions but asking for it is an unknown-action error and nothing runs.
+ENGINE_NAMES: dict[str, GameAction] = {action.name: action for action in LABEL_TO_ENGINE.values()}
 
 # Index -> character for the ascii board in the events sidecar (same alphabet as the sandbox views).
 ASCII_ALPHABET = "WwgGcBMPRbSYOrNp"
@@ -351,10 +354,10 @@ class GameSession:
                 raise TypeError("`actions` must be a non-empty list of {action, row?, col?}")
         else:
             raise ValueError("missing `action` or `actions`")
-        return [self._parse_one(item) for item in items]
+        return [self._parse_one(index, item) for index, item in enumerate(items)]
 
     @staticmethod
-    def _parse_one(item: Any) -> _Request:
+    def _parse_one(index: int, item: Any) -> _Request:
         if not isinstance(item, Mapping):
             raise TypeError(f"each action must be an object with `action`, got {item!r}")
         name = item.get("action")
@@ -363,18 +366,23 @@ class GameSession:
         key = name.strip().upper()
         if key in LABEL_TO_ENGINE:
             action = LABEL_TO_ENGINE[key]
-        elif key in GameAction.__members__:
-            action = GameAction[key]
+        elif key in ENGINE_NAMES:
+            action = ENGINE_NAMES[key]
         else:
-            raise ValueError(f"unknown action {name!r}; use one of {sorted(LABEL_TO_ENGINE)}")
+            raise ValueError(
+                f"action {name!r} (batch position {index}) is not known; use one of {sorted(LABEL_TO_ENGINE)}"
+            )
         label = ENGINE_TO_LABEL.get(action, action.name)
         if not action.is_complex():
             return _Request(action, None, label)
         coords = {}
         for axis in ("row", "col"):
-            value = item.get(axis)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{label} needs integer `row` and `col`; got {axis}={value!r}")
+            # int() conversion as in the original: floats truncate, numeric strings and bools convert;
+            # a missing/None/non-numeric coordinate is an error and nothing runs.
+            try:
+                value = int(item.get(axis))
+            except (TypeError, ValueError):
+                raise TypeError(f"{label} needs integer `row` and `col`; got {axis}={item.get(axis)!r}") from None
             coords[axis] = min(GRID_MAX, max(0, value))
         row, col = coords["row"], coords["col"]
         return _Request(action, {"x": col, "y": row}, f"{label}(row={row}, col={col})")
@@ -403,7 +411,7 @@ class GameSession:
             "state": state.name,
             "valid_actions": self._valid_labels(),
             "board_changed": grid != before_grid,
-            "done": run_complete or game_over,
+            "done": run_complete,  # WIN only, as in the original; GAME_OVER is recoverable
             "level_completed": gained > 0 and not run_complete,
             "game_over": game_over,
             "run_complete": run_complete,
@@ -514,7 +522,7 @@ class GameSession:
             "score": self._levels_completed(),
             "state": state.name,
             "valid_actions": self._valid_labels(),
-            "done": state in (GameState.WIN, GameState.GAME_OVER),
+            "done": state == GameState.WIN,
             "game_over": state == GameState.GAME_OVER,
             "run_complete": state == GameState.WIN,
             "stop_reason": reason,

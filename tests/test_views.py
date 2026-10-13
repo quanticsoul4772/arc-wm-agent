@@ -132,3 +132,10 @@ def test_normalize_actions_forms():
 def test_normalize_actions_rejects(bad, error):
     with pytest.raises(error):
         normalize_actions(bad)
+
+
+def test_xy_rejection_applies_to_the_mouse_label_only():
+    """F18: ACTION6 with x/y passes normalisation; step_env then rejects the missing row/col."""
+    assert normalize_actions({"action": "ACTION6", "x": 1, "y": 2}) == [{"action": "ACTION6"}]
+    with pytest.raises(ValueError):
+        normalize_actions({"action": "mouse", "x": 1})

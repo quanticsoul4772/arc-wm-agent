@@ -54,7 +54,13 @@ class FakeGame:
     counter: int = 0
 
     def __post_init__(self) -> None:
-        self.frame = Obs([self._grid(0)], GameState.NOT_FINISHED, 0, list(SIMPLE))
+        self.frame = Obs([self._grid(0)], GameState.NOT_FINISHED, 0, self._available())
+
+    def _available(self) -> list[int]:
+        # effect "unavailable" removes an action; "available" adds one (e.g. ACTION7)
+        extra = [GameAction[name].value for name, effect in self.effects.items() if effect == "available"]
+        ids = [a for a in SIMPLE if self.effects.get(f"ACTION{a}") != "unavailable"] + extra
+        return ids
 
     @staticmethod
     def _grid(mark: int) -> list[list[int]]:
@@ -82,7 +88,7 @@ class FakeGame:
             self.state = "won"
         elif effect == "reset" and self.sticky_over and self.frame.state == GameState.GAME_OVER:
             state = GameState.GAME_OVER
-        self.frame = Obs([self._grid(self.counter)], state, self.levels_completed, list(SIMPLE))
+        self.frame = Obs([self._grid(self.counter)], state, self.levels_completed, self._available())
         return self.frame
 
     def mark_crashed(self, note: str) -> None:
@@ -152,9 +158,9 @@ def _turn(*actions: str) -> Callable[[int, dict], dict]:
         {"action": "MOUSE", "row": None, "col": None},
         {"action": "MOUSE", "row": 5},
         {"action": "MOUSE", "col": 5},
-        {"action": "MOUSE", "row": "5", "col": 5},
-        {"action": "MOUSE", "row": 5.0, "col": 5},
-        {"action": "MOUSE", "row": True, "col": 5},
+        {"action": "MOUSE", "row": "five", "col": 5},
+        {"action": "MOUSE", "row": "5.5", "col": 5},
+        {"action": "MOUSE", "row": [5], "col": 5},
         {"action": "ACTION6"},
         {"action": "ACTION6", "row": None, "col": 2},
         {"action": "MOUSE", "x": 5, "y": 5},
@@ -177,6 +183,35 @@ def test_mouse_coordinates_are_clamped_and_sent_as_x_col_y_row(tmp_path):
     assert session.game.calls == [("ACTION6", {"x": 63, "y": 0}, 0)]
     assert result["action_display"] == "MOUSE(row=0, col=63)"
     assert result["action_data"] == {"x": 63, "y": 0}
+
+
+@pytest.mark.parametrize(
+    "row,col,expected",
+    [
+        (5.9, 2, {"x": 2, "y": 5}),
+        ("7", "3", {"x": 3, "y": 7}),
+        (True, False, {"x": 0, "y": 1}),
+        (" 4 ", 70.2, {"x": 63, "y": 4}),
+    ],
+)
+def test_mouse_coordinates_are_converted_with_int(tmp_path, row, col, expected):
+    """F7: the original converts with int(), so floats truncate and numeric strings and bools pass."""
+    session = _session(tmp_path)
+    result = session.step_env({"action": "MOUSE", "row": row, "col": col})
+    assert result["executed"] is True
+    assert session.game.calls == [("ACTION6", expected, 0)]
+
+
+def test_action7_is_listed_but_never_executes(tmp_path):
+    """F2: only ACTION1-6 and RESET map to engine actions; ACTION7 is an unknown action."""
+    session = _session(tmp_path, FakeGame(effects={"ACTION7": "available"}))
+    assert "ACTION7" in session._valid_labels()
+    single = session.step_env({"action": "ACTION7"})
+    assert single["executed"] is False and "ACTION7" in single["error"] and set(single) == ERROR_PAYLOAD_KEYS
+    batch = session.step_env({"actions": [{"action": "UP"}, {"action": "action7"}]})
+    assert batch["executed"] is False and "ACTION7" in batch["error"].upper()
+    assert session.game.calls == [] and session.action_count == 0
+    assert "ACTION7" in single["valid_actions"]
 
 
 def test_simple_action_ignores_coordinates_and_engine_names_are_accepted(tmp_path):
@@ -210,12 +245,13 @@ def test_malformed_arguments_give_error_payload(tmp_path, arguments):
 
 BATCH_TABLE = [
     # id, effects, batch, expected engine calls, outcome
-    ("invalid-first", {}, ["ACTION7", "UP"], [], {"error": True}),
+    ("invalid-first", {"ACTION5": "unavailable"}, ["SPACE", "UP"], [], {"error": True}),
+    ("unknown-action7", {"ACTION7": "available"}, ["UP", "ACTION7"], [], {"error": True}),
     ("engine-error-first", {"ACTION1": "raise"}, ["UP", "DOWN"], [], {"error": True}),
     (
         "invalid-later",
-        {},
-        ["UP", "ACTION7", "DOWN"],
+        {"ACTION5": "unavailable"},
+        ["UP", "SPACE", "DOWN"],
         ["ACTION1"],
         {"stop_reason": "invalid_action", "executed_count": 1, "stopped_early": True},
     ),
@@ -238,7 +274,7 @@ BATCH_TABLE = [
         {"ACTION3": "over"},
         ["UP", "LEFT", "DOWN"],
         ["ACTION1", "ACTION3"],
-        {"stop_reason": "game_over", "game_over": True, "done": True, "state": "GAME_OVER", "executed_count": 2},
+        {"stop_reason": "game_over", "game_over": True, "done": False, "state": "GAME_OVER", "executed_count": 2},
     ),
     (
         "win",
@@ -341,10 +377,21 @@ def test_payload_key_sets_match_spec(tmp_path):
     session = _session(tmp_path)
     assert set(session.step_env({"action": "UP"})) == BATCH_PAYLOAD_KEYS
     assert set(session.step_env({"actions": [{"action": "UP"}]})) == BATCH_PAYLOAD_KEYS
-    early = session.step_env({"actions": [{"action": "UP"}, {"action": "ACTION7"}]})
-    assert set(early) == BATCH_PAYLOAD_KEYS | {"stop_detail"}
     assert set(session.step_env({"action": "ACTION7"})) == ERROR_PAYLOAD_KEYS
     assert session.step_env({"action": "UP"})["valid_actions"] == ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
+    no_space = _session(tmp_path / "n", FakeGame(effects={"ACTION5": "unavailable"}))
+    early = no_space.step_env({"actions": [{"action": "UP"}, {"action": "SPACE"}]})
+    assert set(early) == BATCH_PAYLOAD_KEYS | {"stop_detail"}
+
+
+def test_done_is_true_only_on_win(tmp_path):
+    """F6: GAME_OVER is recoverable, so `done` stays False there (also in the terminal payload)."""
+    session = _session(tmp_path, FakeGame(effects={"ACTION1": "over"}))
+    over = session.step_env({"action": "UP"})
+    assert over["game_over"] is True and over["done"] is False
+    assert session.step_env({"action": "DOWN"})["done"] is False  # terminal payload while GAME_OVER
+    won = _session(tmp_path / "w", FakeGame(effects={"ACTION4": "win"})).step_env({"action": "RIGHT"})
+    assert won["run_complete"] is True and won["done"] is True
 
 
 # --- (c) auto-reset ----------------------------------------------------------------------

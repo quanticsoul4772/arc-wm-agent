@@ -113,7 +113,7 @@ def normalize_actions(spec: Any) -> list[dict[str, Any]]:
             label = item.get("action")
             if not isinstance(label, str) or not label.strip():
                 raise ValueError(f"action() dict at index {position} needs a non-empty 'action' string.")
-            if ("x" in item or "y" in item) and label.strip().upper() in ("MOUSE", "ACTION6"):
+            if ("x" in item or "y" in item) and label.strip().upper() == "MOUSE":
                 raise ValueError("MOUSE takes 'row' and 'col', not 'x'/'y'.")
             entry: dict[str, Any] = {"action": label.strip()}
             for key in ("row", "col"):
