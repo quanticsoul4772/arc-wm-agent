@@ -305,8 +305,8 @@ def _safe_builtins() -> dict[str, Any]:
     def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         root = name.split(".")[0]
         if level != 0 or root not in ALLOWED_MODULES:
-            allowed = ", ".join(sorted(ALLOWED_MODULES))
-            raise ImportError(f"Import of '{name}' is blocked here; importable modules: {allowed}.")
+            # no module list: the original's message is about 130 chars shorter (equivalence report round 8)
+            raise ImportError(f"Import of '{name}' is blocked in this sandbox.")
         return real_import(name, globals, locals, fromlist, level)
 
     table["__import__"] = guarded_import

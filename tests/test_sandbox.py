@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -161,6 +162,14 @@ def test_from_imports_and_submodules_of_allowed_modules():
 def test_other_imports_are_blocked(module):
     out = _run(f"import {module}")
     assert "ImportError" in out["error"] and module in out["error"]
+
+
+def test_import_block_message_has_the_original_length():
+    """Round 8: the message names only the module (no allowed-module list), 130 chars shorter than before,
+    which matches the original's serialised length; tool results count toward eviction."""
+    last = _run("import os")["error"].splitlines()[-1]
+    assert last == "ImportError: Import of 'os' is blocked in this sandbox."
+    assert len(json.dumps(last)) - 2 == 55
 
 
 def test_builtin_whitelist_is_the_original_53_names():
