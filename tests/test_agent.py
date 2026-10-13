@@ -190,8 +190,9 @@ def test_structured_tool_call_executes_action_and_persists(tmp_path):
     assert "UP, DOWN" in user[0]["text"]
     assert _roles(agent.history) == ["user", "assistant", "tool"]
     tool = json.loads(agent.history[-1]["content"])
-    assert tool["stdout"] == "hi" and tool["action_result"]["action_display"] == "UP"
-    assert "requested_count" not in tool["action_result"]
+    assert tool == {"tool": "python", "returncode": 0, "stdout": "hi"}  # stdout wins over the action result
+    assert agent.last_action_result["action_display"] == "UP"
+    assert "requested_count" not in agent.last_action_result
     assert agent.generated_tokens == 10
     text = (tmp_path / "transcripts" / "g1_p0.txt").read_text()
     for section in ("SYSTEM PROMPT", "USER PROMPT", "RESPONSE META", "TOOL CALL", "TOOL RESULT", "STATUS"):
@@ -341,21 +342,44 @@ def test_malformed_arguments_and_syntax_errors(tmp_path):
         agent = _agent(server, sandbox=sandbox)
         _analyze(agent, game)
     tools = [json.loads(m["content"]) for m in server.requests[2]["messages"] if m["role"] == "tool"]
-    assert tools[0]["error"].startswith("Empty code")
-    assert tools[1]["error"].startswith("Python syntax error:")
+    assert tools[0]["error"].startswith("Empty code") and "tool" not in tools[0]
+    assert tools[1]["error"].startswith("Python syntax error:") and "tool" not in tools[1]
     assert len(sandbox.calls) == 1
 
 
 def test_terminal_latch_stubs_later_actions_in_the_cell(tmp_path):
     game = FakeGame(tmp_path, level_len=1)
-    code = 'a = action("UP")\nb = action("UP")\nresult = b'
+    code = 'a = action("UP")\nb = action("UP")\nresult = [b, last_action_result]'
     with FakeOpenAIServer([tool_call_response(code)]) as server:
         agent = _agent(server)
         _analyze(agent, game)
     assert len(game.calls) == 1
     tool = json.loads(agent.history[-1]["content"])
-    assert tool["result"]["executed"] is False and tool["result"]["stop_reason"] == "previous_level_completed"
-    assert tool["action_calls"] == 2
+    stub, seen_in_cell = tool["result"]
+    assert stub["executed"] is False and stub["stop_reason"] == "previous_level_completed"
+    assert stub["valid_actions"] == [] and stub["executed_count"] == 0 and stub["requested_count"] == 1
+    assert stub["stopped_early"] is True and stub["level"] == 2 and stub["score"] == 1
+    assert seen_in_cell == stub  # the stub becomes last_action_result inside the cell
+    assert set(tool) == {"tool", "returncode", "result"}
+
+
+def test_latch_needs_an_executed_terminal_result(tmp_path):
+    """F19: a non-executed result never latches; later action() calls in the cell still run."""
+    game = FakeGame(tmp_path)
+    real_step_env = game.step_env
+
+    def step_env(arguments):  # a non-executed terminal payload, e.g. GAME_OVER reported without a move
+        if arguments["actions"][0]["action"] == "LEFT":
+            game.calls.append(arguments)
+            return {"executed": False, "game_over": True, "done": True, "stop_reason": "game_over"}
+        return real_step_env(arguments)
+
+    code = 'action("LEFT")\naction("UP")'
+    with FakeOpenAIServer([tool_call_response(code)]) as server:
+        agent = _agent(server)
+        agent.analyze(state_path=game.state_path, action_count=0, valid_actions=["ACTION1"], step_env=step_env,
+                      transcript_path=None, analysis_step=1, request_timeout=5.0, should_stop=lambda: False)
+    assert [c["actions"] for c in game.calls] == [[{"action": "LEFT"}], [{"action": "UP"}]]
 
 
 def test_tool_output_truncated(tmp_path):
@@ -632,3 +656,30 @@ def test_optional_gate_prepends_simulate(tmp_path):
         agent = _agent(server, gate=gate, sandbox=sandbox)
         assert _analyze(agent, game)["step_executed"]
     assert "def simulate(" in sandbox.calls[0]["code"] and "__WM_CONFIRMED = False" in sandbox.calls[0]["code"]
+
+
+# --------------------------------------------------------------------------- tool-result shape and compaction
+
+
+def test_tool_result_precedence():
+    """F5: exactly one of stdout / result / single action result / action summary; actions go under `result`."""
+    fmt = agent_mod.format_tool_result
+    one, two = {"executed": True, "action_num": 1}, {"executed": True, "action_num": 2}
+    assert json.loads(fmt({"stdout": "s", "result": 1}, [one], 4096)) == {"tool": "python", "returncode": 0, "stdout": "s"}
+    assert json.loads(fmt({"stdout": "", "result": [1]}, [one], 4096)) == {"tool": "python", "returncode": 0, "result": [1]}
+    assert json.loads(fmt({"stdout": "", "result": None}, [one], 4096))["result"] == one
+    assert json.loads(fmt({"result": None}, [one, two], 4096))["result"] == {"action_calls": 2, "last_action_result": two}
+    assert json.loads(fmt({"result": None}, [], 4096)) == {"tool": "python", "returncode": 0}
+    assert json.loads(fmt({"error": "E", "stdout": "o"}, [one], 4096)) == {"tool": "python", "error": "E", "stdout": "o"}
+
+
+def test_compact_result_keys_and_defaults():
+    """F11: 13 base keys always (False/None defaults), executed_actions fallback, extras kept even when None."""
+    error = agent_mod.compact_result({"executed": False, "error": "bad", "valid_actions": ["UP"],
+                                      "run_elapsed_seconds": 1.23456, "time_remaining_seconds": None})
+    assert list(error)[:14] == list(agent_mod.COMPACT_KEYS)
+    assert error["done"] is False and error["level"] is None and error["executed_actions"] == []
+    assert error["time_remaining_seconds"] is None and error["run_elapsed_seconds"] == 1.23456
+    assert "timing" not in error and "executed_count" not in error
+    single = agent_mod.compact_result({"executed": True, "action_display": "UP", "batch_size": 1, "stop_reason": None})
+    assert single["executed_actions"] == ["UP"] and single["stop_reason"] is None

@@ -140,12 +140,17 @@ CONTEXT_ERROR_MARKERS = (
     '"param":"input_tokens"',
 )
 
-COMPACT_KEYS = (
+# Always emitted by compact_result (missing ones default to False for flags, None otherwise), then
+# executed_actions (falling back to [action_display]).
+COMPACT_BASE_KEYS = (
     "executed", "action_num", "level", "score", "reward", "state", "valid_actions", "board_changed", "done",
-    "level_completed", "game_over", "run_complete", "action_display", "executed_actions",
+    "level_completed", "game_over", "run_complete", "action_display",
 )
+COMPACT_FLAG_KEYS = frozenset({"executed", "board_changed", "done", "level_completed", "game_over", "run_complete"})
+COMPACT_KEYS = (*COMPACT_BASE_KEYS, "executed_actions")
 BATCH_KEYS = ("requested_count", "executed_count", "stopped_early")
-EXTRA_KEYS = ("stop_reason", "stop_detail", "run_elapsed_seconds", "time_remaining_seconds", "timing", "error")
+# Copied whenever present in the payload, None values included.
+EXTRA_KEYS = ("stop_reason", "stop_detail", "run_elapsed_seconds", "time_remaining_seconds", "error")
 TERMINAL_FLAGS = ("run_complete", "game_over", "level_completed", "done")
 
 
@@ -371,11 +376,16 @@ def to_label(name: str) -> str:
 
 
 def compact_result(payload: dict[str, Any]) -> dict[str, Any]:
-    compact = {key: payload[key] for key in COMPACT_KEYS if key in payload}
+    compact = {key: payload.get(key, False if key in COMPACT_FLAG_KEYS else None) for key in COMPACT_BASE_KEYS}
+    executed_actions = payload.get("executed_actions")
+    if executed_actions is None:
+        display = payload.get("action_display")
+        executed_actions = [display] if display is not None else []
+    compact["executed_actions"] = executed_actions
     batch_size = payload.get("requested_count", payload.get("batch_size", 1)) or 1
     if batch_size > 1 or payload.get("stopped_early"):
         compact.update({key: payload[key] for key in BATCH_KEYS if key in payload})
-    compact.update({key: payload[key] for key in EXTRA_KEYS if key in payload and payload[key] is not None})
+    compact.update({key: payload[key] for key in EXTRA_KEYS if key in payload})
     return compact
 
 
@@ -708,11 +718,11 @@ class ToolAgent:
             return json.dumps({"tool": call["name"], "error": f"Unknown tool '{call['name']}'. Use python."}, indent=2)
         code = call["arguments"].get("code")
         if not isinstance(code, str) or not code.strip():
-            return json.dumps({"tool": "python", "error": "Empty code: pass Python source in `code`."}, indent=2)
+            return json.dumps({"error": "Empty code: pass Python source in `code`."}, indent=2)
         try:
             compile(code, "<python_tool>", "exec")
         except SyntaxError as exc:
-            return json.dumps({"tool": "python", "error": _truncate(f"Python syntax error: {exc}", limit)}, indent=2)
+            return json.dumps({"error": _truncate(f"Python syntax error: {exc}", limit)}, indent=2)
 
         run_python, refused = self.sandbox()
         cell = _Cell()
@@ -721,14 +731,22 @@ class ToolAgent:
             items = actions if isinstance(actions, list) else [actions]
             items = [{"action": a} if isinstance(a, str) else a for a in items]
             if cell.latched:
-                stub = {
+                last = cell.results[-1] if cell.results else {}
+                stub = compact_result({
                     "executed": False,
+                    "level": last.get("level"),
+                    "score": last.get("score"),
+                    "state": last.get("state"),
+                    "valid_actions": [],
+                    "requested_count": len(items),
+                    "executed_count": 0,
+                    "stopped_early": True,
                     "stop_reason": f"previous_{cell.latched}",
                     "stop_detail": f"An earlier action() in this cell already reported {cell.latched}; "
                     "no further actions run in this cell. Look at the new board first.",
-                    "valid_actions": list(ctx.valid_actions),
-                }
+                })
                 cell.results.append(stub)
+                self.last_action_result = stub
                 return {"action_result": stub, "state": self._state(ctx)}
             # The gate's action accounting lives here, as in the original: the level is observed
             # only before the check, so a level completed by this batch is still scored on the old
@@ -749,7 +767,7 @@ class ToolAgent:
             if executed > 0:
                 ctx.results.append(result)
                 ctx.executed_any = True
-            for flag in TERMINAL_FLAGS:
+            for flag in TERMINAL_FLAGS if result.get("executed") else ():
                 if result.get(flag):
                     cell.latched = flag
                     break
@@ -856,15 +874,17 @@ def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, A
         if stdout:
             body["stdout"] = _truncate(str(stdout), limit)
         return json.dumps(body, indent=2)
+    # Exactly one of: stdout, else result, else the single action result, else the action summary;
+    # the last two go under `result` too (the original's precedence).
     body = {"tool": "python", "returncode": 0}
+    result = outcome.get("result")
     if stdout:
         body["stdout"] = _truncate(str(stdout), limit)
-    result = outcome.get("result")
-    if result is not None:
+    elif result is not None:
         body["result"] = _truncate(result, limit) if isinstance(result, str) else _collapse_planned(result)
-    if len(action_results) == 1:
-        body["action_result"] = _collapse_planned(action_results[0])
+    elif len(action_results) == 1:
+        body["result"] = _collapse_planned(action_results[0])
     elif action_results:
-        body["action_calls"] = len(action_results)
-        body["last_action_result"] = _collapse_planned(action_results[-1])
+        body["result"] = {"action_calls": len(action_results),
+                          "last_action_result": _collapse_planned(action_results[-1])}
     return json.dumps(body, indent=2, default=str)

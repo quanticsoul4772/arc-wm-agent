@@ -499,8 +499,8 @@ class GameSession:
 
     def _timing(self) -> dict[str, float | None]:
         return {
-            "run_elapsed_seconds": round(self.elapsed(), 3),
-            "time_remaining_seconds": _round(self.time_remaining()),
+            "run_elapsed_seconds": self.elapsed(),
+            "time_remaining_seconds": self.time_remaining(),
         }
 
     def _error(self, message: str) -> dict[str, Any]:
@@ -561,10 +561,6 @@ class GameSession:
 def _ascii(grid: list[list[int]]) -> str:
     top = len(ASCII_ALPHABET) - 1
     return "\n".join("".join(ASCII_ALPHABET[min(top, max(0, int(v)))] for v in row) for row in grid)
-
-
-def _round(value: float | None) -> float | None:
-    return None if value is None else round(value, 3)
 
 
 def make_play(
