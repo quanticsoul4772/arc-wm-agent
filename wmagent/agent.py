@@ -269,7 +269,8 @@ def extract_notes(text: str) -> dict[str, str]:
             continue
         if current is not None:
             found[current].append(line.strip())
-    return {key: "\n".join(lines) for key, lines in found.items() if lines}
+    # each note is collapsed to one line, as in the original
+    return {key: " ".join(lines) for key, lines in found.items() if lines}
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> float:
@@ -630,7 +631,8 @@ class ToolAgent:
         def yield_reason() -> str | None:
             if should_stop():
                 return "stop_requested"
-            if self.clock() - started >= self.config.yield_seconds:
+            # LOCAL_ANALYZER_YIELD_SECONDS <= 0 disables the turn budget, as in the original
+            if self.config.yield_seconds > 0 and self.clock() - started >= self.config.yield_seconds:
                 return "turn_time_budget"
             return None
 
@@ -657,7 +659,8 @@ class ToolAgent:
             markup_seen = markup_in_reasoning or markup_in_content
             calls = [
                 {"id": call.get("id") or self._next_call_id(), "name": (call.get("function") or {}).get("name", ""),
-                 "arguments": _parse_arguments((call.get("function") or {}).get("arguments"))}
+                 "arguments": _parse_arguments((call.get("function") or {}).get("arguments")),
+                 "raw_arguments": (call.get("function") or {}).get("arguments")}
                 for call in message.get("tool_calls") or []
             ]
             if not calls and markup_seen:
@@ -710,13 +713,17 @@ class ToolAgent:
 
     @staticmethod
     def _assistant_message(content: str, reasoning: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
-        message: dict[str, Any] = {"role": "assistant", "content": content}
+        # content only when non-empty, and the server's own argument strings are re-sent unchanged
+        message: dict[str, Any] = {"role": "assistant"}
+        if content:
+            message["content"] = content
         if reasoning:
             message["reasoning"] = reasoning
         if calls:
             message["tool_calls"] = [
                 {"id": c["id"], "type": "function",
-                 "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}}
+                 "function": {"name": c["name"], "arguments": c["raw_arguments"]
+                              if isinstance(c.get("raw_arguments"), str) else json.dumps(c["arguments"])}}
                 for c in calls
             ]
         return message
@@ -750,6 +757,7 @@ class ToolAgent:
         code = call["arguments"].get("code")
         if not isinstance(code, str) or not code.strip():
             return json.dumps({"error": "Empty code: pass Python source in `code`."}, indent=2)
+        code = code.rstrip()  # the original rstrips the cell before running it and before after_cell
         try:
             compile(code, "<python_tool>", "exec")
         except SyntaxError as exc:

@@ -566,10 +566,10 @@ def test_extract_notes_labels_bullets_continuations():
         "goal model: reach the yellow cell\n* Plan: UP x3\n1. Cross-level notes: timer bar on top\nunrelated"
     )
     notes = extract_notes(text)
-    assert notes["world"] == "red block moves with arrows\nwalls are grey"
+    assert notes["world"] == "red block moves with arrows walls are grey"  # collapsed to one line
     assert notes["goal"] == "reach the yellow cell"
     assert notes["plan"] == "UP x3"
-    assert notes["cross_level"] == "timer bar on top\nunrelated"
+    assert notes["cross_level"] == "timer bar on top unrelated"
 
 
 def test_notes_carried_then_cleared_on_level_transition(tmp_path):
@@ -757,3 +757,36 @@ def test_compact_result_keys_and_defaults():
     assert "timing" not in error and "executed_count" not in error
     single = agent_mod.compact_result({"executed": True, "action_display": "UP", "batch_size": 1, "stop_reason": None})
     assert single["executed_actions"] == ["UP"] and single["stop_reason"] is None
+
+
+# --------------------------------------------------------------------------- smaller original behaviours (F20)
+
+
+def test_yield_seconds_zero_disables_the_turn_budget(tmp_path):
+    game = FakeGame(tmp_path)
+    ticks = iter([0.0] + [10_000.0] * 20)
+    with FakeOpenAIServer([tool_call_response('print("x")'), tool_call_response('action("UP")')]) as server:
+        agent = _agent(server, clock=lambda: next(ticks), yield_seconds=0.0)
+        out = _analyze(agent, game)
+    assert out["step_executed"] and len(server.requests) == 2
+
+
+def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path):
+    game = FakeGame(tmp_path)
+    sandbox = FakeSandbox()
+    gate = WorldModelGate(probe_actions=8, max_refusals=8)
+    gate.reset(game.state_path)
+    seen = []
+    real_after_cell = gate.after_cell
+    gate.after_cell = lambda code, errored, backtest: (seen.append(code), real_after_cell(code, errored, backtest))
+    raw = json.dumps({"code": 'action("UP")\n\n  '}, indent=1)  # server formatting must survive
+    message = {"content": "", "tool_calls": [{"id": "k", "type": "function",
+                                              "function": {"name": "python", "arguments": raw}}]}
+    with FakeOpenAIServer([chat_body(message, "tool_calls")]) as server:
+        agent = _agent(server, gate=gate, sandbox=sandbox)
+        agent._state_path = game.state_path
+        _analyze(agent, game)
+    assert seen == ['action("UP")'] and sandbox.calls[0]["code"].endswith('action("UP")')
+    assistant = agent.history[1]
+    assert "content" not in assistant
+    assert assistant["tool_calls"][0]["function"]["arguments"] == raw
