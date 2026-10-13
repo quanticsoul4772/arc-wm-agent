@@ -277,30 +277,45 @@ def render_notes(notes: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _summary_text(summary: dict[str, Any] | None) -> str:
-    if not summary:
-        return ""
-    count = summary.get("executed_count", 0)
-    labels = ", ".join(summary.get("executed_actions") or []) or "none"
-    parts = [
-        (
-            f"Previous turn: {count} action(s) played ({labels}), "
-            f"action #{summary.get('start_action_num')} to #{summary.get('end_action_num')}."
-        ),
-        (
-            f"Afterwards the game was on level {summary.get('level')} in state {summary.get('state')}, and the "
-            f"board {'changed' if summary.get('board_changed') else 'did not change'}."
-        ),
-    ]
-    # A fixed-shape status line rather than optional sentences: the original's per-turn prompt size barely
-    # depends on these events, and eviction depends on prompt size (report round 5).
-    def yes_no(key: str) -> str:
-        return "yes" if summary.get(key) else "no"
+MAX_LISTED_LABELS = 10
 
-    parts.append(
-        f"Level changed: {yes_no('level_transition')}. GAME_OVER: {yes_no('game_over')}. "
-        f"Game complete: {yes_no('run_complete')}. Stopped early: {yes_no('stop_reason')}."
-    )
+# Previous-turn facts, as the original conveys them (report round 6): the executed count and up to 10
+# labels, exactly one level outcome, a game-over fact when one occurred. Nothing else (no stop reason,
+# board change, state name or action-number span).
+SUMMARY_COUNT = "Your last turn executed {count} {noun}: {labels}."
+OUTCOME_RUN_COMPLETE = "That finished the whole game."
+OUTCOME_NEW_LEVEL = "You finished a level; new one."
+OUTCOME_SAME_LEVEL = "You are still on the same level."
+GAME_OVER_FACT = "It ended in GAME_OVER and the level was restarted."
+# GAME_OVER while still on the same level: one combined sentence, as the original combines them.
+SAME_LEVEL_GAME_OVER = "GAME_OVER; same level was restarted."
+NOTHING_EXECUTED = "No action has been executed yet in this game."
+NOTHING_CAPTURED = "No previous action sequence was captured."
+
+
+def _labels_text(labels: list[str]) -> str:
+    if not labels:
+        return "none"
+    shown = ", ".join(labels[:MAX_LISTED_LABELS])
+    if len(labels) > MAX_LISTED_LABELS:
+        shown += f", ... (first {MAX_LISTED_LABELS} of {len(labels)} shown)"
+    return shown
+
+
+def _summary_text(summary: dict[str, Any]) -> str:
+    count = int(summary.get("executed_count") or 0)
+    parts = [SUMMARY_COUNT.format(count=count, noun="action" if count == 1 else "actions",
+                                  labels=_labels_text(list(summary.get("executed_actions") or [])))]
+    if summary.get("run_complete"):
+        parts.append(OUTCOME_RUN_COMPLETE)
+    elif summary.get("level_progressed"):
+        parts.append(OUTCOME_NEW_LEVEL)
+    elif summary.get("game_over"):
+        return " ".join([*parts, SAME_LEVEL_GAME_OVER])
+    else:
+        parts.append(OUTCOME_SAME_LEVEL)
+    if summary.get("game_over"):
+        parts.append(GAME_OVER_FACT)
     return " ".join(parts)
 
 
@@ -330,16 +345,19 @@ you how many moves you have or how close you are to finishing, and they are easy
 
 _LATER_TURN_GUIDE = """For this turn:
 1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
-changes as objects moving, appearing, vanishing or changing colour, not as raw cells.
+changes as objects moving, appearing, vanishing or changing colour, not as raw cells. A move that changed \
+nothing also tells you something about the rules.
 2. Compare the outcome with what your Plan expected. Where it differs, record that in Recent findings and \
 correct the World model or the Action model.
 3. If the level changed, survey the new board through the segmentation before reusing old assumptions.
 4. If a move had no visible effect, note the label and position so you do not repeat it, and check whether \
 only an edge counter changed.
-5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture.
+5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture. \
+Keep each line short; long notes crowd out the board history you need later.
 6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
 is reliable, saying what you expect. Stop after any result with level_completed, game_over, \
-run_complete or done set, and look at the new board before playing anything else."""
+run_complete or done set, and look at the new board before playing anything else. Prefer the \
+moves whose result you can predict."""
 
 
 _TURN_REMINDERS = """Reminders:
@@ -358,18 +376,22 @@ def user_prompt(
     *,
     step: int,
     level: int,
-    number_of_levels: int | None,
-    action_count: int,
+    max_level_seen: int,
     valid_actions: list[str],
     notes: dict[str, str],
     previous_summary: dict[str, Any] | None,
-    first_turn: bool,
 ) -> str:
-    level_text = f"{level} of {number_of_levels}" if number_of_levels else str(level)
-    lines = [f"Turn {step}. You are on level {level_text}. Actions spent in this game so far: {action_count}."]
-    summary = _summary_text(previous_summary)
-    if summary:
-        lines.append(summary)
+    """`step` is the next step number (1 before anything ran); `max_level_seen` is the highest level any
+    recorded frame showed and is mentioned only when it is above `level`."""
+    header = f"Step {step}, level {level}."
+    if max_level_seen > level:
+        header += f" Highest level reached so far: {max_level_seen}."
+    first_turn = previous_summary is None and step <= 1
+    if previous_summary is not None:
+        facts = _summary_text(previous_summary)
+    else:
+        facts = NOTHING_EXECUTED if first_turn else NOTHING_CAPTURED
+    lines = [f"{header} {facts}"]
     lines.append(
         f"Labels accepted right now: {', '.join(valid_actions) if valid_actions else 'none'}. MOUSE needs "
         "integer row and col (0 to 63, row 0 at the top); the other labels take no arguments. The harness "
@@ -378,13 +400,16 @@ def user_prompt(
     lines.append(RUNTIME_REMINDER)
     carried = render_notes(notes)
     if carried:
-        lines.append(
-            "Your labelled notes, carried over from your earlier replies. Check each line against the current board "
-            "and revise them in this reply:\n" + carried
-        )
+        lines.append(NOTES_HEADER + "\n" + carried)
     lines.append(_FIRST_TURN_GUIDE if first_turn else _LATER_TURN_GUIDE)
     lines.append(_TURN_REMINDERS)
     return "\n\n".join(lines)
+
+
+NOTES_HEADER = (
+    "Your labelled notes, carried over from your earlier replies. Check each line against the current board "
+    "and revise them in this reply:"
+)
 
 
 _CORRECTIVE_BODY = """Every turn has to end with at least one real move played from a python cell. \

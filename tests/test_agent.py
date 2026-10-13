@@ -672,7 +672,7 @@ def test_notes_carried_then_cleared_on_level_transition(tmp_path):
     third_prompt = server.requests[2]["messages"][-1]["content"][0]["text"]
     assert "World model: marker moves" in second_prompt and "Plan: go up" in second_prompt
     assert "World model:" not in third_prompt and "Cross-level notes: levels take 2 moves" in third_prompt
-    assert "on level 2." in third_prompt
+    assert ", level 2." in third_prompt
 
 
 def test_notes_cleared_on_game_over(tmp_path):
@@ -911,9 +911,9 @@ ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (repor
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
-# Rewrite serialised sizes after round-5 tuning: first turn, later turn without notes, a one-line notes
+# Rewrite serialised sizes after round-6 tuning: first turn, later turn without notes, a one-line notes
 # block, corrective. The D2 per-template means they produce are within +/-5 chars of the original's.
-PINNED_TEMPLATE_SIZES = [2814, 2917, 148, 1249]
+PINNED_TEMPLATE_SIZES = [2806, 2914, 148, 1249]
 
 
 def _near(value, target, tolerance=0.10):
@@ -927,14 +927,13 @@ def test_prompt_sizes_are_close_to_the_original():
     assert abs(serialised - ORIGINAL_SYSTEM_MESSAGE_SERIALISED) <= 5
     assert abs(len(json.dumps(agent_mod.TOOLS, sort_keys=True, ensure_ascii=True)) - ORIGINAL_TOOLS_CHARS) <= 5
     labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
-    first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels,
-                                notes={}, previous_summary=None, first_turn=True)
+    first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=labels, notes={},
+                                previous_summary=None)
     assert _near(len(first), ORIGINAL_FIRST_USER_CHARS)
-    summary = {"executed_count": 2, "executed_actions": ["UP", "MOUSE(row=12, col=40)"], "start_action_num": 14,
-               "end_action_num": 15, "level": 2, "state": "NOT_FINISHED", "board_changed": True}
+    summary = {"executed_count": 2, "executed_actions": ["UP", "MOUSE(row=12, col=40)"], "level": 2}
     notes = {key: "x" * 25 for key, _ in prompts.NOTE_LABELS}  # a short carried-notes block
-    later = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
-                                notes=notes, previous_summary=summary, first_turn=False)
+    later = prompts.user_prompt(step=16, level=2, max_level_seen=2, valid_actions=labels, notes=notes,
+                                previous_summary=summary)
     assert _near(len(later), ORIGINAL_LATER_USER_CHARS)
     assert _near(len(prompts.corrective_prompt(False)), ORIGINAL_CORRECTIVE_CHARS, 0.01)
     assert _near(len(prompts.corrective_prompt(True)), ORIGINAL_CORRECTIVE_CHARS, 0.15)
@@ -948,38 +947,53 @@ def _serialised(text):
     return len(json.dumps(text, ensure_ascii=True))
 
 
-def test_turn_events_barely_change_the_user_prompt_size():
-    """Round-5 sizes: the original's later-turn prompt is nearly the same size after a level change, a halted
-    batch or GAME_OVER, so the summary uses a fixed-shape status line (only yes/no values change)."""
-    labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
-    base = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "start_action_num": 14, "end_action_num": 15,
-            "level": 2, "state": "NOT_FINISHED", "board_changed": True}
+LABELS = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
 
-    def size(**summary):
-        return _serialised(prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15,
-                                               valid_actions=labels, notes={}, previous_summary={**base, **summary},
-                                               first_turn=False))
 
-    plain = size()
-    assert 0 < size(level_transition=True, stop_reason="level_completed") - plain <= 2
-    assert 0 < size(game_over=True, stop_reason="game_over") - plain <= 2
-    text = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels, notes={},
-                               previous_summary={**base, "level_transition": True}, first_turn=False)
-    assert "Level changed: yes. GAME_OVER: no. Game complete: no. Stopped early: no." in text
+def _facts(summary=None, step=16, level=2, max_level_seen=2):
+    text = prompts.user_prompt(step=step, level=level, max_level_seen=max_level_seen, valid_actions=LABELS,
+                               notes={}, previous_summary=summary)
+    return text.split("\n\n")[0]
+
+
+def test_previous_turn_summary_conveys_the_original_facts_only():
+    """Round 6: count, up to 10 labels, exactly one level outcome, a game-over fact, step and level (plus the
+    highest level when higher); no stop reason, board change, state name, action span or turn number."""
+    base = {"executed_count": 2, "executed_actions": ["UP", "MOUSE(row=3, col=4)"], "level": 2}
+    assert _facts(base) == ("Step 16, level 2. Your last turn executed 2 actions: UP, MOUSE(row=3, col=4). "
+                            + prompts.OUTCOME_SAME_LEVEL)
+    one = _facts({**base, "executed_count": 1, "executed_actions": ["UP"]})
+    assert "executed 1 action: UP." in one
+    assert "executed 0 actions: none." in _facts({**base, "executed_count": 0, "executed_actions": []})
+    many = _facts({**base, "executed_count": 14, "executed_actions": [f"A{i}" for i in range(14)]})
+    assert "A9, ... (first 10 of 14 shown)." in many and "A10" not in many
+    assert _facts({**base, "level_progressed": True, "level_transition": True}).endswith(prompts.OUTCOME_NEW_LEVEL)
+    # a changed level number without a completed-level result is not "a new level"
+    assert _facts({**base, "level_transition": True}).endswith(prompts.OUTCOME_SAME_LEVEL)
+    assert _facts({**base, "run_complete": True, "level_progressed": True}).endswith(prompts.OUTCOME_RUN_COMPLETE)
+    assert _facts({**base, "game_over": True}).endswith(prompts.SAME_LEVEL_GAME_OVER)
+    assert _facts({**base, "game_over": True, "level_progressed": True}).endswith(
+        prompts.OUTCOME_NEW_LEVEL + " " + prompts.GAME_OVER_FACT)
+    assert _facts(base, level=2, max_level_seen=3).startswith("Step 16, level 2. Highest level reached so far: 3.")
+    assert _facts(None, step=1, level=1, max_level_seen=1) == "Step 1, level 1. " + prompts.NOTHING_EXECUTED
+    assert _facts(None, step=5, level=1, max_level_seen=1) == "Step 5, level 1. " + prompts.NOTHING_CAPTURED
+    full = prompts.user_prompt(step=16, level=2, max_level_seen=2, valid_actions=LABELS, notes={},
+                               previous_summary={**base, "stop_reason": "invalid_action", "board_changed": True,
+                                                 "state": "NOT_FINISHED"})
+    for absent in ("invalid_action", "NOT_FINISHED", "Turn ", "Stopped early", "board changed", "#"):
+        assert absent not in full
 
 
 def test_template_sizes_are_pinned():
-    """Serialised sizes tuned to the original's per-template means (report round 5, within +/-5 chars);
-    a wording change must re-measure against the original before this pin is updated."""
-    labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
-    summary = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "start_action_num": 14,
-               "end_action_num": 15, "level": 2, "state": "NOT_FINISHED", "board_changed": True}
-    first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels, notes={},
-                                previous_summary=None, first_turn=True)
-    later = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
-                                notes={}, previous_summary=summary, first_turn=False)
-    with_notes = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
-                                     notes={"plan": "p"}, previous_summary=summary, first_turn=False)
+    """Serialised sizes tuned to the original's per-template means (report rounds 5-6, within +/-5 chars on the
+    D2 replays); a wording change must re-measure against the original before this pin is updated."""
+    summary = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "level": 2}
+    first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=LABELS, notes={},
+                                previous_summary=None)
+    later = prompts.user_prompt(step=16, level=2, max_level_seen=2, valid_actions=LABELS, notes={},
+                                previous_summary=summary)
+    with_notes = prompts.user_prompt(step=16, level=2, max_level_seen=2, valid_actions=LABELS,
+                                     notes={"plan": "p"}, previous_summary=summary)
     sizes = [_serialised(first), _serialised(later), _serialised(with_notes) - _serialised(later),
              _serialised(prompts.corrective_prompt(False))]
     assert sizes == PINNED_TEMPLATE_SIZES

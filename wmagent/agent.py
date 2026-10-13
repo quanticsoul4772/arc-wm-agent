@@ -559,7 +559,6 @@ class ToolAgent:
         config: AgentConfig | None = None,
         gate: WorldModelGate | None | str = "env",
         sandbox: tuple[Callable[..., dict[str, Any]], type[Exception]] | None = None,
-        number_of_levels: int | None = None,
         prompts_dir: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -568,7 +567,6 @@ class ToolAgent:
             raise ValueError("No analyzer base URL: the base-URL variable in use is set but empty.")
         self.gate = WorldModelGate.from_env() if gate == "env" else gate
         self._sandbox = sandbox
-        self.number_of_levels = number_of_levels
         self.prompts_dir = prompts_dir
         self.clock = clock
         self.http = requests.Session()
@@ -590,7 +588,6 @@ class ToolAgent:
         self.last_summary: dict[str, Any] | None = None
         self.last_action_result: dict[str, Any] = {}
         self.notes: dict[str, str] = {}
-        self.max_level = 1
         self.turns = 0
         self._recovered_ids = 0
         self._saved_history: list[dict[str, Any]] = []
@@ -710,11 +707,14 @@ class ToolAgent:
         self.turns += 1
         runtime = load_runtime_state(state_path)
         frame = runtime.get("current_frame") or {}
-        self.max_level = max(self.max_level, int(frame.get("level") or 1))
+        level = int(frame.get("level") or 1)
+        if self.last_summary is not None:
+            level = max(level, int(self.last_summary.get("level") or 1))
+        seen = [int((entry.get("frame") or {}).get("level") or 1) for entry in runtime.get("history") or []]
         text = prompts.user_prompt(
-            step=step, level=self.max_level, number_of_levels=self.number_of_levels, action_count=action_count,
-            valid_actions=valid_actions, notes=self.notes, previous_summary=self.last_summary,
-            first_turn=not self.history and self.last_summary is None,
+            step=max(int(frame.get("step") or 0), action_count) + 1, level=level,
+            max_level_seen=max([level, *seen]), valid_actions=valid_actions, notes=self.notes,
+            previous_summary=self.last_summary,
         )
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         if self.config.multimodal_context == "current_grid" and frame.get("grid"):
@@ -839,7 +839,6 @@ class ToolAgent:
         if ctx.results:
             self.last_summary = summarize(ctx.results, ctx.start_level)
             self.last_action_result = ctx.results[-1]
-            self.max_level = max(self.max_level, int(self.last_summary.get("level") or 1))
             if any(self.last_summary.get(flag) for flag in ("level_transition", "run_complete", "game_over")):
                 for key in prompts.LEVEL_SCOPED_NOTES:
                     self.notes.pop(key, None)
@@ -977,25 +976,19 @@ def summarize(results: list[dict[str, Any]], start_level: int) -> dict[str, Any]
             labels.extend(str(a) for a in executed)
         elif result.get("action_display"):
             labels.append(str(result["action_display"]))
-    count = sum(executed_count_of(r) for r in results)
-    first, last = results[0], results[-1]
-    end_num = last.get("action_num")
-    start_num = None
-    if isinstance(first.get("action_num"), int):
-        start_num = first["action_num"] - executed_count_of(first) + 1
+    last = results[-1]
     return {
-        "executed_count": count,
+        # each executed result counts at least 1, as in the original
+        "executed_count": sum(max(1, executed_count_of(r)) for r in results),
         "executed_actions": labels,
-        "start_action_num": start_num,
-        "end_action_num": end_num,
         "level": last.get("level"),
-        "state": last.get("state"),
-        "board_changed": any(r.get("board_changed") for r in results),
+        # prompt fact: a new level only when an action reported completing one
+        "level_progressed": any(r.get("level_completed") for r in results),
+        # notes clearing also reacts to a changed level number
         "level_transition": any(r.get("level_completed") for r in results)
         or (last.get("level") is not None and last.get("level") != start_level),
         "run_complete": any(r.get("run_complete") for r in results),
         "game_over": any(r.get("game_over") for r in results),
-        "stop_reason": last.get("stop_reason"),
     }
 
 
