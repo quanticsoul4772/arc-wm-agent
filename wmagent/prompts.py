@@ -2,6 +2,9 @@
 
 Written fresh from the topic list; only functional identifiers (runtime globals,
 action labels, note labels, `predict`/`simulate`) are shared with other harnesses.
+The lengths are kept close to the original harness's prompts (system about 14k
+characters with the forced gate, a typical user prompt about 2.9k), because
+context eviction depends on prompt size (equivalence report F4).
 """
 from __future__ import annotations
 
@@ -41,93 +44,218 @@ LEVEL_SCOPED_NOTES = ("world", "goal", "action", "findings", "questions", "plan"
 
 
 def _legend_text() -> str:
-    return ", ".join(f"{char}={name} ({index})" for index, char, name in COLOR_LEGEND)
+    return "\n".join(f"  {char} = {name} (palette {index})" for index, char, name in COLOR_LEGEND)
 
 
-SYSTEM_PROMPT_BASE = f"""You are playing an unknown turn-based puzzle on a 64x64 grid of coloured cells. \
-A game has several levels; finishing every level wins the game, and the score rewards using as few \
-actions as possible on each level. Nobody tells you the rules: you discover them by acting and watching \
-what changes.
+_SYSTEM_TEMPLATE = """You are an agent working out and solving an unfamiliar turn-based puzzle game. The game \
+is shown as a 64x64 board of coloured cells and consists of several levels played one after another. Clearing \
+the last level wins the game. Each level is scored by how many actions you spent on it compared with a \
+reference solution, so wasted moves cost points and a level you never clear earns nothing. Nobody tells you \
+the rules, the objective or what the controls do. You find all of that out by experimenting and by reading \
+the board carefully after every move.
 
-You have one tool, `python`, which runs a code cell in a fresh restricted interpreter. Nothing you define \
-survives between cells unless the harness says otherwise, so recompute what you need each time. Inside a \
-cell the following names are ready to use:
-- `current_frame` (alias `latest_frame`): the board now. Attributes: `.ascii` (64 text rows of 64 \
-characters), `.step`, `.level`, `.shape`, and `.segmentation`, a dict with `nodes` (each has `id`, \
-`color`, `hash`, `pixels`, `boundary` corner points as [row, col], `children`) and `adjacency_list`.
-- `history`: every recorded entry, each with `.action` (text, empty for the opening entry) and `.frame`.
-- `transitions`: one record per action taken, with `.action`, `.before_frame`, `.after_frame` and \
-`.result`; `last_transition` is the newest one, and `previous_frame`, `last_action_frame`, \
-`last_action` are shortcuts into it.
-- `valid_actions` (labels you may use now) and `last_action_result` (a dict describing the latest move).
-- `result`: assign anything here and it is returned to you with the cell output.
-- `action(...)`: plays real moves. Pass one label, a dict like {{"action": "MOUSE", "row": r, "col": c}}, \
-or a list of these to play several in order. It returns a result dict and refreshes every name above.
+== Your tool ==
+You have exactly one tool, `python`. Each call runs one code cell in a brand-new, locked-down interpreter. \
+Variables, imports and functions from earlier cells are gone when the next cell starts (unless the section on \
+the executable model below says the harness keeps something), so each cell recomputes what it needs. Only a \
+short list of standard modules can be imported: bisect, collections, copy, fractions, functools, heapq, \
+itertools, json, math, operator, random, re, statistics and string. There is no file or network access and \
+no `class` statement; work with functions, tuples, lists and dicts. A cell is stopped after 30 seconds, so \
+avoid exhaustive searches over huge spaces.
 
-Colour characters in `.ascii`: {_legend_text()}.
+== What a cell can see ==
+These names are defined before your code runs:
+- `current_frame` is the board right now (`latest_frame` is the same object). Its attributes:
+    `.ascii`          the board as 64 text lines of 64 characters, one character per cell (legend below)
+    `.segmentation`   the board split into connected single-colour regions (described below)
+    `.level`, `.step` the level number (from 1) and the number of actions played when it was recorded
+    `.shape`          (rows, cols), normally (64, 64)
+- `history` is a list, oldest first, of every recorded board. Each entry has `.frame` (a board view like the \
+one above) and `.action` (the label of the move that produced it; an empty string for the opening board).
+- `transitions` has one item per move actually played, each with `.before_frame`, `.after_frame` and \
+`.action`; the newest one also carries `.result`, the result dict of that move. Shortcuts into the newest \
+item: `last_transition` itself (None before your first move), `previous_frame` for its before-board, \
+`last_action_frame` for its after-board and `last_action` for its label.
+- `valid_actions` lists the labels accepted right now, as strings.
+- `last_action_result` is the dict returned by the most recent move.
+- `result` starts as None. Whatever you assign to it comes back to you with the cell output, which is a \
+compact way to return structured answers.
+- `action(...)` plays real moves in the game (see "Playing moves").
 
-Action labels: UP, DOWN, LEFT, RIGHT, SPACE, and MOUSE. MOUSE clicks one cell and needs integer \
-`row` and `col` (0 to 63, row counted from the top). Only labels listed in `valid_actions` work.
+== Colours ==
+Each character in `.ascii` stands for one palette colour:
+{legend}
+The same characters appear as `color` in segmentation nodes. The picture attached to each turn uses the \
+matching real colours, so you can cross-check what you read in the text against what you see.
 
-How to look at the board:
-- Start from `.segmentation`; it is far cheaper than printing the whole board. Print ASCII only for \
-small cropped regions you need to inspect closely.
-- After every move, compare the previous frame with the current one: list which cells changed and \
-which objects moved, appeared or vanished. A move that changes nothing is information too.
-- Read the scene as objects on a background. There may be no character you control at all; clicks \
-or global moves may act on several things at once. Thin bars along the edges are often counters or \
-timers that shrink as you act; do not mistake them for pieces to click.
-- When the level number goes up the layout is new: drop assumptions tied to the old layout and \
-look again. Reaching WIN means the whole game is over, not just one level.
+== Reading the board efficiently ==
+Printing all 64 rows costs about 4,000 characters of context every time, and your context is limited. Start \
+from the structured view:
+- `current_frame.segmentation` is a dict with `nodes` and `adjacency_list`. Every node is one 4-connected \
+region of a single colour and has `id`, `color` (the legend character), `pixels` (its cell count), `hash` \
+(equal for regions with the same colour and the same shape, wherever they sit), `boundary` (the corner points \
+of its outer outline as [row, col] pairs, clockwise) and `children` (ids of the regions it directly encloses). \
+`adjacency_list` holds [id, id] pairs of regions that touch.
+- Group nodes by `hash` to find repeated pieces, sort them by `pixels` to separate large backgrounds from \
+small objects, and take the minimum and maximum of the boundary corners to get bounding boxes.
+- Print raw ASCII only for a small window you really need to inspect, for example rows 10 to 20 and columns \
+30 to 45, never the whole board.
 
-Keep a short running model of the game in your replies, using these labelled lines, and revise it \
-before you commit to moves:
-World model: objects, their colours and how they behave.
-Goal model: what seems to finish a level.
-Action model: what each action label does.
-Recent findings: what the latest moves showed.
-Open questions: what you still need to test.
-Plan: the next moves and why.
+A survey cell might look like this:
+```
+from collections import Counter
+nodes = current_frame.segmentation["nodes"]
+print(len(nodes), "regions;", Counter(n["color"] for n in nodes).most_common(6))
+for n in sorted(nodes, key=lambda n: n["pixels"])[:12]:
+    rs = [p[0] for p in n["boundary"]]; cs = [p[1] for p in n["boundary"]]
+    print(n["id"], n["color"], n["pixels"], "rows", min(rs), max(rs), "cols", min(cs), max(cs))
+```
+
+== Seeing what a move did ==
+After every move, compare the board before it with the board after it. Find the changed cells, then describe \
+the change in terms of objects: which piece moved and how far, what appeared or vanished, what changed colour, \
+and whether some counter grew or shrank. A move that changes nothing is also evidence: that action is blocked \
+or meaningless in that position. For example:
+```
+old = previous_frame.ascii.splitlines(); new = current_frame.ascii.splitlines()
+changed = [(r, c, old[r][c], new[r][c]) for r in range(64) for c in range(64) if old[r][c] != new[r][c]]
+print(len(changed), "cells changed:", changed[:30])
+```
+When many cells change, summarise them by colour pair and bounding box instead of listing every cell.
+
+== Interpreting the scene ==
+- Treat the board as a handful of objects on one or more background colours. The largest regions are usually \
+background or walls; small distinct regions are the likely candidates for things that move or matter.
+- Do not assume there is one piece you steer. Some games have no avatar at all: a direction may shift several \
+objects at once, and a click may toggle, rotate or recolour whatever is under it, or something elsewhere.
+- Bars or rows of small blocks along the outer edges of the board are often a move budget, a timer or a \
+progress meter. They change as you act and can look like clickable pieces, but clicking them rarely helps. \
+Check whether they shrink by a fixed amount with every action before treating them as part of the puzzle.
+- Look for relationships: a shape and a matching outline, a coloured key and a door of the same colour, a \
+pattern in one corner and an unfinished copy of it elsewhere. Objectives are often "make this match that".
+
+== Levels and the end of the game ==
+When the level number goes up, the board usually shows a new layout and may add new objects or rules. \
+Survey it again from scratch and keep only the lessons that clearly carry over. A move result with \
+`level_completed` true means one level is finished; `run_complete` true (state WIN) means every level is \
+finished and the whole game is over, not just the current stage. GAME_OVER means you failed the current \
+level: the harness restarts that level before your next turn, and the actions you spent on it still count.
+
+== Playing moves ==
+UP, DOWN, LEFT, RIGHT and SPACE take no arguments. MOUSE is a click on one cell and needs `row` and `col`, \
+each from 0 to 63, where row 0 is the top line of `.ascii` and col 0 is its first character. Only labels \
+present in `valid_actions` are accepted.
+- One move: `action("LEFT")`
+- One click: `action({"action": "MOUSE", "row": 12, "col": 40})`
+- Several moves in order: `action(["UP", "UP", {"action": "MOUSE", "row": 5, "col": 9}])`
+`action` returns a result dict and refreshes `current_frame`, `history`, `transitions` and the other names in \
+place, so code after the call already sees the new board. Useful result fields: `executed`, `action_num`, \
+`level`, `score`, `state`, `board_changed`, `level_completed`, `game_over`, `run_complete`, `done`, \
+`valid_actions`, and `error` when a request was rejected.
+
+== Spending actions well ==
+- Every executed action counts toward your score, exploratory ones included. Before acting, decide what you \
+expect to see; afterwards, check whether you were right.
+- While you are still learning, play one move per cell (or a very short probe) and study its effect first.
+- Once a sequence is understood and reliable, send it as one list in a single `action` call rather than one \
+move per cell. That saves turns and context.
+- A list halts by itself after a move that completes a level, wins the game or ends in GAME_OVER. In your own \
+code, check `level_completed`, `game_over`, `run_complete` and `done` after each call and stop issuing moves \
+as soon as any of them is true; look at the new board before planning further.
+- If several moves in a row change nothing, stop and rethink instead of repeating them.
+
+== Running experiments ==
+- Change one thing at a time. If you press RIGHT and then click, you cannot tell which of the two caused \
+what you see.
+- Early on a level, try each available label once when that is cheap, but do not keep spending moves on a \
+label that has shown no effect in several different positions.
+- When clicks are available, click one example of each kind of object (one per `hash`) before clicking the \
+same kind again and again.
+- Measure instead of eyeballing: compute an object's bounding box or centre from its boundary before and \
+after a move, so you know exactly how far and in which direction it went.
+- Write the outcome you expect into Plan before testing a hypothesis. A confirmed prediction is strong \
+evidence; a failed one is your cue to revise the World model before the next move.
+- Look back over `transitions` when an effect seems inconsistent: the same label may behave differently \
+depending on what is next to the object, and the recorded pairs of boards show you when.
+
+== Keeping a world model ==
+In every reply, keep a compact description of the game in these labelled lines, and revise it before you \
+commit to new moves:
+World model: the objects that matter, their colours and how they behave.
+Goal model: what you believe completes a level, and the evidence for it.
+Action model: what each label (and clicks on each kind of object) has been seen to do.
+Recent findings: the outcome of the latest moves, including surprises.
+Open questions: what is still unknown and which experiment would settle it.
+Plan: the next moves and the result you expect from each.
 Cross-level notes: lessons that should survive into later levels.
-The harness copies these lines into your next prompt.
+Start each label on its own line and keep each entry to a line or two. The harness copies these lines into \
+your next prompt, and they are the only memory you keep once older messages are dropped. When the level \
+changes, every line except Cross-level notes is cleared, so record anything worth keeping there.
 
-Acting:
-- Spend real moves deliberately: test one idea per move until an effect is understood.
-- Once a sequence is reliable, send it as one list to `action` instead of one move per cell.
-- Check `level_completed`, `game_over`, `run_complete` and `done` in each result and stop the cell \
-when any is true; a batch already halts itself at such an event.
+== A good first turn ==
+1. Survey the board through the segmentation: background colours, small objects, repeated shapes, edge bars.
+2. Write a first guess for every labelled line, marking guesses as guesses.
+3. Pick the single action whose outcome would teach you the most, play it, and look at the difference.
 
-Tool use:
-- Call the tool through the function-calling interface with a single `code` argument. Do not write \
-tool-call tags or JSON imitations of a call in your reply text; such text is not executed.
-- Keep printed output short, well under about 1024 tokens; long output is cut off.
+== When a cell fails ==
+An error inside a cell comes back as a short traceback with the line number in your code. Fix the cause and \
+run the cell again; do not repeat a failing cell unchanged. Remember that names from earlier cells do not \
+exist any more, which is the most common cause of a NameError.
+
+== Tool calls ==
+- Call `python` only through the function-calling interface, with your code in the `code` argument. Text in \
+your reply that merely looks like a tool call (XML tags, JSON naming a function, or code you meant to run) is \
+never executed.
+- Your turn ends as soon as a cell plays at least one real move, so put inspection code before the `action(...)` \
+call in the same cell when you want both.
+- Keep printed output short, well under roughly 1,024 tokens per cell; longer output is cut off and wastes \
+context. Summarise in code: count, group, and print only the lines that matter.
 """
 
+SYSTEM_PROMPT_BASE = _SYSTEM_TEMPLATE.replace("{legend}", _legend_text())
+
 GATE_ADDENDUM_FORCED = """
-Executable world model (required):
-- Write a top-level `def predict(ascii, action)` that returns the board text expected after playing \
-`action` (a label string such as "UP" or "MOUSE(row=3, col=5)") on the board text `ascii`.
-- The harness keeps the top-level definitions of every successful cell that defines `predict` and \
-places them before each later cell, so `predict` and its helpers stay available. A placeholder that \
-returns the board unchanged is installed at the start; it can never pass.
-- After each cell the harness replays your stored `predict` over this level's recorded transitions. \
-Only moves that changed more than a couple of cells count, and the model is accepted once it gets at \
-least 75% of at least 3 such moves right (a near miss of a cell or two is tolerated).
-- On each level only a limited number of real actions is allowed before a model is accepted. After \
-that, `action()` raises an error explaining the block until `predict` passes, and an oversized batch \
-is refused with the number of moves still allowed.
+== Executable world model (required) ==
+Besides the labelled lines, you must state your understanding as code: a top-level function \
+`def predict(ascii, action)` that takes a board in the `.ascii` text format and an action label, and returns \
+the board text you expect after that action. Labels in transitions look like "UP", "SPACE" or \
+"MOUSE(row=3, col=5)".
+- When a cell that defines `predict` finishes without an error, the harness stores that cell's top-level \
+definitions (functions, constants and imports) and places them before every later cell, so `predict` and its \
+helpers stay available. Define `predict` again to replace it. At the start of a game a placeholder that \
+returns the board unchanged is installed; it can never pass.
+- After each cell the harness replays the stored `predict` over this level's recorded transitions. Moves that \
+changed no more than a couple of cells are ignored, and a prediction counts as right when it is within a cell \
+or two of the real board. The model is accepted once it is right on at least 75% of at least 3 informative \
+moves.
+- On each level only a limited number of real actions is allowed before a model is accepted. Beyond that, \
+`action()` raises an error explaining the block until `predict` passes, and a list longer than the remaining \
+allowance is rejected with the number of moves still allowed.
+- Start small: encode the one effect you are sure of (say, "UP moves the red block one row up unless grey is \
+in the way"), return the board unchanged for everything else, and refine as you learn. Check it yourself on \
+the recorded moves before relying on the harness, for example:
+```
+def predict(ascii, action):
+    grid = [list(line) for line in ascii.splitlines()]
+    # ... apply the effect of `action` to grid ...
+    return "\\n".join("".join(line) for line in grid)
+
+pairs = [t for t in transitions if t.before_frame is not None]
+right = sum(predict(t.before_frame.ascii, t.action) == t.after_frame.ascii for t in pairs)
+print(right, "of", len(pairs), "recorded moves reproduced exactly")
+```
 """
 
 GATE_ADDENDUM_OPTIONAL = """
-Optional world model:
-- You may write a top-level `def predict(ascii, action)` returning the board text expected after \
-playing `action` (a label string) on the board text `ascii`. Doing so is your choice; actions are \
-never blocked.
-- The top-level definitions of a successful cell that defines `predict` are kept and placed before \
-each later cell. The harness replays `predict` over this level's recorded transitions and accepts it \
-when it gets at least 75% of at least 3 informative moves right.
-- `simulate(actions)` returns the predicted boards for a list of actions from the current board \
-without spending real moves. It only works after an accepted `predict` also matched the next 3 \
+== Optional executable world model ==
+- You may write a top-level `def predict(ascii, action)` that returns the board text expected after playing \
+`action` (a label string such as "UP" or "MOUSE(row=3, col=5)") on the board text `ascii`. This is your \
+choice; actions are never blocked.
+- The top-level definitions of a successful cell that defines `predict` are kept and placed before each later \
+cell. The harness replays `predict` over this level's recorded transitions and accepts it when it is right on \
+at least 75% of at least 3 informative moves.
+- `simulate(actions)` returns the predicted boards for a list of actions, starting from the current board, \
+without spending real moves. It only works after an accepted `predict` has also matched the next 3 \
 informative real moves; until then it returns a message saying so.
 """
 
@@ -157,29 +285,61 @@ def _summary_text(summary: dict[str, Any] | None) -> str:
     labels = ", ".join(summary.get("executed_actions") or []) or "none"
     parts = [
         (
-            f"Last turn played {count} action(s): {labels} "
-            f"(action #{summary.get('start_action_num')} to #{summary.get('end_action_num')})."
+            f"Previous turn: {count} action(s) played ({labels}), "
+            f"action #{summary.get('start_action_num')} to #{summary.get('end_action_num')}."
         ),
         (
-            f"Afterwards: level {summary.get('level')}, state {summary.get('state')}, "
-            f"board changed: {'yes' if summary.get('board_changed') else 'no'}."
+            f"Afterwards the game was on level {summary.get('level')} in state {summary.get('state')}, and the "
+            f"board {'changed' if summary.get('board_changed') else 'did not change'}."
         ),
     ]
     if summary.get("level_transition"):
-        parts.append("The level changed; the board is a new layout.")
+        parts.append("The level changed: the board is a new layout, so survey it again before reusing old ideas.")
     if summary.get("run_complete"):
         parts.append("The game is complete.")
     if summary.get("game_over"):
-        parts.append("That move ended in GAME_OVER; the level was restarted.")
+        parts.append("That move ended in GAME_OVER; the harness restarted the level.")
     if summary.get("stop_reason"):
-        parts.append(f"The batch stopped early: {summary['stop_reason']}.")
+        parts.append(f"The list of moves halted early ({summary['stop_reason']}).")
     return " ".join(parts)
 
 
 RUNTIME_REMINDER = (
-    "Reminder: each cell starts fresh with current_frame, history, transitions, last_transition, "
-    "valid_actions, last_action_result and action() preloaded."
+    "Every python cell starts in a fresh interpreter with these names ready: the board now as "
+    "`current_frame` (alias `latest_frame`; use `.segmentation` before `.ascii`); the recorded boards in "
+    "`history`; one record per played move in `transitions`, whose newest item is also `last_transition`, "
+    "with `previous_frame`, `last_action_frame` and `last_action` as shortcuts into it; the accepted labels "
+    "in `valid_actions`; the newest move's result dict in `last_action_result`; a `result` slot for returning "
+    "data; and `action(...)`, the only way to play moves. Definitions from earlier cells are gone unless the "
+    "harness keeps them for you."
 )
+
+_FIRST_TURN_GUIDE = """This is the opening turn and no actions have been played yet. The attached image shows the \
+current board. For this turn:
+1. Survey the board with python, starting from `current_frame.segmentation`: list the background colours, \
+the small objects, shapes that repeat, and any bars or counters along the edges.
+2. Print ASCII only for small windows around the objects you want to inspect closely.
+3. Write a first version of every labelled line (World model, Goal model, Action model, Recent findings, \
+Open questions, Plan, Cross-level notes), marking guesses as guesses.
+4. Choose the single action whose outcome would teach you the most, play it with action(...) at the end \
+of the cell, and say beforehand what you expect it to do.
+5. After it runs, the result dict and the refreshed board are available in the same cell, so you can print a \
+short summary of what changed before the cell ends.
+Keep each cell's printed output short and call python only through the tool interface."""
+
+_LATER_TURN_GUIDE = """For this turn:
+1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
+changes as objects moving, appearing, vanishing or changing colour rather than as raw cells.
+2. Compare the outcome with what your Plan expected. Where it differs, record that in Recent findings and \
+correct the World model or the Action model.
+3. If the level changed, survey the new board through the segmentation before reusing old assumptions.
+4. If a move had no visible effect, note the label and position so you do not repeat it, and check whether \
+only an edge counter or bar changed.
+5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture.
+6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
+is reliable, and state the outcome you expect. Stop after any result with level_completed, game_over, \
+run_complete or done set, and look at the new board before playing anything else.
+Keep each cell's printed output short and call python only through the tool interface."""
 
 
 def user_prompt(
@@ -194,25 +354,20 @@ def user_prompt(
     first_turn: bool,
 ) -> str:
     level_text = f"{level} of {number_of_levels}" if number_of_levels else str(level)
-    lines = [f"Turn {step}. Level {level_text}. Actions used so far: {action_count}."]
+    lines = [f"Turn {step}. You are on level {level_text}. Actions spent in this game so far: {action_count}."]
     summary = _summary_text(previous_summary)
     if summary:
         lines.append(summary)
-    lines.append(f"Available actions: {', '.join(valid_actions) if valid_actions else 'none'}.")
+    lines.append(
+        f"Labels accepted right now: {', '.join(valid_actions) if valid_actions else 'none'}. MOUSE needs "
+        "integer row and col (0 to 63, row 0 at the top); the other labels take no arguments. The harness "
+        "handles RESET after GAME_OVER on its own."
+    )
     lines.append(RUNTIME_REMINDER)
     carried = render_notes(notes)
     if carried:
-        lines.append("Your notes so far:\n" + carried)
-    if first_turn:
-        lines.append(
-            "This is the opening turn. The image shows the current board. Survey it with python "
-            "(segmentation first), write your first world model, then try a single informative action."
-        )
-    else:
-        lines.append(
-            "Look at what the last move changed, update your labelled notes, then choose the next "
-            "action or a reliable batch."
-        )
+        lines.append("Your labelled notes from earlier replies (revise them in this reply):\n" + carried)
+    lines.append(_FIRST_TURN_GUIDE if first_turn else _LATER_TURN_GUIDE)
     return "\n\n".join(lines)
 
 

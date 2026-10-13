@@ -546,8 +546,9 @@ def test_history_is_evicted_by_images_across_turns(tmp_path):
         agent = _agent(server)
         probe = agent._state_path
         assert probe is None
-        # A window that holds roughly two turns (each carries an image of ~1-2k chars).
-        agent.config = replace(agent.config, context_window=agent.config.reply_reserve + 512 + 2400)
+        # A window that holds the system prompt plus roughly two turns (each carries an image of ~1-2k chars).
+        system_tokens = int(estimate_tokens([{"role": "system", "content": agent.system_prompt}]))
+        agent.config = replace(agent.config, context_window=agent.config.reply_reserve + 512 + system_tokens + 2400)
         for step in range(1, 5):
             assert _analyze(agent, game, step)["step_executed"]
     counts = [len(r["messages"]) for r in server.requests]
@@ -592,7 +593,7 @@ def test_notes_carried_then_cleared_on_level_transition(tmp_path):
     third_prompt = server.requests[2]["messages"][-1]["content"][0]["text"]
     assert "World model: marker moves" in second_prompt and "Plan: go up" in second_prompt
     assert "World model:" not in third_prompt and "Cross-level notes: levels take 2 moves" in third_prompt
-    assert "Level 2" in third_prompt
+    assert "on level 2." in third_prompt
 
 
 def test_notes_cleared_on_game_over(tmp_path):
@@ -790,3 +791,36 @@ def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path
     assistant = agent.history[1]
     assert "content" not in assistant
     assert assistant["tool_calls"][0]["function"]["arguments"] == raw
+
+
+# --------------------------------------------------------------------------- prompt size (F4)
+
+# Sizes measured on the original harness by the equivalence verifier (report F4); eviction depends on them.
+ORIGINAL_SYSTEM_CHARS = 14_065
+ORIGINAL_USER_MEDIAN_CHARS = 2_878
+ORIGINAL_TOOLS_CHARS = 1_144
+
+
+def _near(value, target, tolerance=0.10):
+    return abs(value - target) <= tolerance * target
+
+
+def test_prompt_sizes_are_close_to_the_original():
+    assert _near(len(prompts.system_prompt("forced")), ORIGINAL_SYSTEM_CHARS)
+    assert _near(len(json.dumps(agent_mod.TOOLS)), ORIGINAL_TOOLS_CHARS)
+    summary = {"executed_count": 2, "executed_actions": ["UP", "MOUSE(row=12, col=40)"], "start_action_num": 14,
+               "end_action_num": 15, "level": 2, "state": "NOT_FINISHED", "board_changed": True}
+    notes = {key: "x" * 70 for key, _ in prompts.NOTE_LABELS}  # a typical carried-notes block (~0.55k chars)
+    text = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15,
+                               valid_actions=["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"], notes=notes,
+                               previous_summary=summary, first_turn=False)
+    assert _near(len(text), ORIGINAL_USER_MEDIAN_CHARS)
+
+
+def test_runtime_reminder_interleaves_the_global_names():
+    """The plain list of global names matched an 8-word run in the original prompt; it is reworded."""
+    words = " ".join(prompts.RUNTIME_REMINDER.lower().replace("`", " ").replace("_", " ").split())
+    assert "transitions last transition valid actions" not in words
+    for name in ("current_frame", "history", "transitions", "last_transition", "valid_actions",
+                 "last_action_result", "action("):
+        assert name in prompts.RUNTIME_REMINDER
