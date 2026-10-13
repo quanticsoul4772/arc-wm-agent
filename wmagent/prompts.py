@@ -176,8 +176,6 @@ same kind again and again.
 after a move, so you know exactly how far and in which direction it went.
 - Write the outcome you expect into Plan before testing a hypothesis. A confirmed prediction is strong \
 evidence; a failed one is your cue to revise the World model before the next move.
-- Look back over `transitions` when an effect seems inconsistent: the same label may behave differently \
-depending on what is next to the object, and the recorded pairs of boards show you when.
 
 == Keeping a world model ==
 In every reply, keep a compact description of the game in these labelled lines, and revise it before you \
@@ -275,7 +273,7 @@ def render_notes(notes: dict[str, str]) -> str:
     for key, label in NOTE_LABELS:
         value = notes.get(key, "").strip()
         if value:
-            lines.append(f"{label}: {value}")
+            lines.append(f"- {label}: {value}")
     return "\n".join(lines)
 
 
@@ -333,7 +331,7 @@ _LATER_TURN_GUIDE = """For this turn:
 1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
 changes as objects moving, appearing, vanishing or changing colour rather than as raw cells.
 2. Compare the outcome with what your Plan expected. Where it differs, record that in Recent findings and \
-correct the World model or the Action model.
+correct the World model or the Action model. Say which part of the old picture the surprise contradicts.
 3. If the level changed, survey the new board through the segmentation before reusing old assumptions.
 4. If a move had no visible effect, note the label and position so you do not repeat it, and check whether \
 only an edge counter or bar changed.
@@ -392,8 +390,8 @@ difference between previous_frame and current_frame instead of printing the whol
 2. Bring your labelled notes up to date with what you have learned so far, World model and Plan first, so \
 that the next prompt carries them.
 3. In the same cell or a following one, call action(...) with the move you judge most informative, or with a \
-list of moves if the sequence is already reliable, and say what you expect it to do. When unsure what to \
-try, one cheap probe teaches more than another reply without a move.
+list of moves if the sequence is already reliable, and say what you expect it to do. One cheap probe \
+beats another reply without a move.
 Describing a move in prose, or writing code in your reply without calling the tool, plays nothing. Each cell \
 starts fresh with the game state preloaded, so it does not depend on anything you wrote earlier. Keep the \
 printed output of each cell short, well under about 1,024 tokens, so that your context is not used up by \

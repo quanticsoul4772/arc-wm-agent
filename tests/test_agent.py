@@ -875,10 +875,10 @@ def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path
 # --------------------------------------------------------------------------- prompt size (F4)
 
 # Sizes measured on the original harness by the equivalence verifier (report F4); eviction depends on them.
-ORIGINAL_SYSTEM_CHARS = 14_065
+ORIGINAL_SYSTEM_CHARS = 13_913  # as measured in D2 (report round 3)
 ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (report F4b)
 ORIGINAL_LATER_USER_CHARS = 3_104
-ORIGINAL_CORRECTIVE_CHARS = 1_278
+ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
 
 
@@ -887,7 +887,7 @@ def _near(value, target, tolerance=0.10):
 
 
 def test_prompt_sizes_are_close_to_the_original():
-    assert _near(len(prompts.system_prompt("forced")), ORIGINAL_SYSTEM_CHARS)
+    assert abs(len(prompts.system_prompt("forced")) - ORIGINAL_SYSTEM_CHARS) <= 30
     assert _near(len(json.dumps(agent_mod.TOOLS)), ORIGINAL_TOOLS_CHARS)
     labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
     first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels,
@@ -899,7 +899,7 @@ def test_prompt_sizes_are_close_to_the_original():
     later = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
                                 notes=notes, previous_summary=summary, first_turn=False)
     assert _near(len(later), ORIGINAL_LATER_USER_CHARS)
-    assert _near(len(prompts.corrective_prompt(False)), ORIGINAL_CORRECTIVE_CHARS)
+    assert _near(len(prompts.corrective_prompt(False)), ORIGINAL_CORRECTIVE_CHARS, 0.01)
     assert _near(len(prompts.corrective_prompt(True)), ORIGINAL_CORRECTIVE_CHARS, 0.15)
 
 
@@ -948,6 +948,7 @@ def test_runtime_reminder_interleaves_the_global_names():
         ("Local", {"OPENAI_BASE_URL": "http://a:1/v1", "OPENAI_PROVIDER": "openai"},
          ("http://127.0.0.1:1234/v1", "openai")),
         ("m", {"OPENAI_BASE_URL": "http://host.docker.internal:8000/v1"}, ("http://127.0.0.1:8000/v1", "vllm")),
+        ("local-qwen", {"LOCAL_ANALYZER_BASE_URL": "", "OPENAI_BASE_URL": "http://a:1/v1"}, ("", "vllm")),
     ],
 )
 def test_base_url_and_provider_precedence(model, env, expected):
