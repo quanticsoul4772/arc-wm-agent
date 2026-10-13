@@ -19,7 +19,7 @@ from typing import Any
 from wmagent.segmentation import ASCII_ALPHABET, segment, to_char_rows
 
 
-class FrameView:
+class AsciiFrameView:
 
     def __init__(self, frame: dict[str, Any] | None, color_chars: str = ASCII_ALPHABET) -> None:
         frame = frame or {}
@@ -46,6 +46,10 @@ class FrameView:
             self._ascii = "\n".join(to_char_rows(self._grid, self._color_chars))
         return self._ascii
 
+    @ascii.setter
+    def ascii(self, value: str) -> None:  # assignable, as in the original
+        self._ascii = value
+
     @property
     def segmentation(self) -> dict:
         if self._segmentation is None:
@@ -54,7 +58,11 @@ class FrameView:
         return self._segmentation
 
     def __repr__(self) -> str:
-        return f"FrameView(step={self.step!r}, level={self.level!r}, shape={self.shape!r})"
+        rows, cols = (tuple(self.shape) + (0, 0))[:2]
+        return f"AsciiFrameView(level={self.level}, step={self.step}, shape={rows}x{cols})"
+
+
+FrameView = AsciiFrameView
 
 
 class HistoryEntry:
@@ -163,7 +171,8 @@ class RuntimeState:
         self.last_action_result.clear()
         self.last_action_result.update(result)
         if transitions:
-            transitions[-1].result = self.last_action_result
+            # a copy, as in the original: not the same object as `last_action_result`
+            transitions[-1].result = dict(self.last_action_result)
 
         ns = self.namespace
         ns["current_frame"] = current_view
@@ -206,7 +215,7 @@ def install_runtime(
             runtime.last_action_result.clear()
             runtime.last_action_result.update(action_result)
             if runtime.transitions:
-                runtime.transitions[-1].result = runtime.last_action_result
+                runtime.transitions[-1].result = dict(runtime.last_action_result)
         return dict(action_result) if isinstance(action_result, dict) else action_result
 
     namespace["action"] = action

@@ -105,7 +105,9 @@ def test_action_result_fills_missing_state_keys():
     ns["action"](["UP"])
     assert ns["last_action_result"] == {"executed": True, "valid_actions": ["DOWN"]}
     assert ns["valid_actions"] == ["DOWN"]
-    assert ns["last_transition"].result is ns["last_action_result"]
+    # a copy of last_action_result, as in the original
+    assert ns["last_transition"].result == ns["last_action_result"]
+    assert ns["last_transition"].result is not ns["last_action_result"]
 
 
 def test_normalize_actions_forms():
@@ -139,3 +141,11 @@ def test_xy_rejection_applies_to_the_mouse_label_only():
     assert normalize_actions({"action": "ACTION6", "x": 1, "y": 2}) == [{"action": "ACTION6"}]
     with pytest.raises(ValueError):
         normalize_actions({"action": "mouse", "x": 1})
+
+
+def test_frame_view_repr_and_assignable_ascii():
+    """F15: the original's repr format, and `.ascii` can be assigned."""
+    frame = FrameView({"grid": [[0] * 4 for _ in range(3)], "step": 1, "level": 2})
+    assert repr(frame) == "AsciiFrameView(level=2, step=1, shape=3x4)"
+    frame.ascii = "custom"
+    assert frame.ascii == "custom"

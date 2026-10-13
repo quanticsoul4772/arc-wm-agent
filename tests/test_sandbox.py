@@ -32,9 +32,13 @@ def test_stdout_and_result():
     assert out == {"stdout": "hi\n", "result": {"a": [1, 2], "b": "wW\nWW"}, "action_results": []}
 
 
-def test_result_defaults_to_none_and_unserialisable_values_become_repr():
+def test_result_defaults_to_none_and_serialisation_follows_the_original():
+    """F14: sets become lists, inf/nan pass through, other objects use str()."""
     assert _run("x = 1")["result"] is None
-    assert _run("result = {1}")["result"] == "{1}"
+    assert _run("result = {1}")["result"] == [1]
+    out = _run("result = [float('inf'), float('nan'), frozenset([2]), {(1, 2): 3}, range(2)]")["result"]
+    assert out[0] == float("inf") and out[1] != out[1]
+    assert out[2:] == [[2], {"(1, 2)": 3}, "range(0, 2)"]
 
 
 def test_nothing_persists_between_cells():
@@ -170,16 +174,36 @@ def test_dunder_import_goes_through_the_whitelist():
     assert _run("result = __import__('math').floor(2.5)")["result"] == 2
 
 
-def test_common_builtins_and_classes_work():
+def test_common_builtins_work():
     code = (
-        "class Box:\n    def __init__(self, v):\n        self.v = v\n"
-        "try:\n    {}['k']\nexcept KeyError:\n    caught = True\n"
-        "result = [sorted(zip('ba', range(2))), isinstance(Box(1), Box), getattr(Box(3), 'v'), caught,"
-        " sum(map(abs, [-1, 2])), dir(current_frame)[-1]]"
+        "try:\n    int('x')\nexcept ValueError:\n    caught = True\n"
+        "result = [sorted(zip('ba', range(2))), isinstance(1, int), getattr(current_frame, 'step'), caught,"
+        " sum(map(abs, [-1, 2])), ascii('\\u00e9')]"
     )
     out = _run(code)
     assert out.get("error") is None, out
-    assert out["result"] == [[["a", 1], ["b", 0]], True, 3, True, 3, "step"]
+    assert out["result"] == [[["a", 1], ["b", 0]], True, 1, True, 3, ascii("é")]
+
+
+@pytest.mark.parametrize(
+    "code, missing",
+    [
+        ("class Box:\n    pass", "__build_class__"),
+        ("try:\n    {}['k']\nexcept KeyError:\n    pass", "KeyError"),
+        ("print(object)", "object"),
+        ("super", "super"),
+        ("property", "property"),
+        ("print(__name__)", "__name__"),
+    ],
+)
+def test_builtins_the_original_lacks(code, missing):
+    """F12/F13: the original's whitelist has no class machinery, few exception names and no __name__."""
+    out = _run(code)
+    assert "NameError" in out["error"].splitlines()[-1] and missing in out["error"]
+
+
+def test_functions_defined_in_a_cell_have_no_module():
+    assert _run("def f():\n    pass\nresult = repr(f.__module__)")["result"] == "None"
 
 
 # --- action protocol --------------------------------------------------------

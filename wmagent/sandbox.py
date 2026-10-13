@@ -19,7 +19,6 @@ itself before any model code runs). POSIX only.
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 from collections.abc import Callable
@@ -45,20 +44,20 @@ ALLOWED_MODULES = frozenset(
     }
 )
 
+# Matches the original's whitelist as far as the equivalence report describes it: no class machinery
+# (`__build_class__`, `object`, `property`, `staticmethod`, `classmethod`, `super`) and only four
+# exception names, so `class` statements and e.g. `except KeyError:` fail with NameError there too.
 SAFE_BUILTIN_NAMES = (
     # numbers and conversion
-    "abs", "all", "any", "bin", "bool", "chr", "complex", "divmod", "float", "format", "hex",
+    "abs", "all", "any", "ascii", "bin", "bool", "chr", "complex", "divmod", "float", "format", "hex",
     "int", "max", "min", "oct", "ord", "pow", "round", "sum",
     # collections and iteration
     "dict", "enumerate", "filter", "frozenset", "iter", "len", "list", "map", "next", "range",
     "reversed", "set", "slice", "sorted", "str", "tuple", "zip", "bytes", "bytearray",
-    # objects and introspection the model needs for ordinary code
-    "callable", "dir", "getattr", "hasattr", "hash", "isinstance", "issubclass", "object", "print",
-    "property", "repr", "staticmethod", "classmethod", "super", "type",
+    # introspection and output
+    "callable", "dir", "getattr", "hasattr", "hash", "isinstance", "issubclass", "print", "repr", "type",
     # exceptions
-    "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "Exception",
-    "IndexError", "KeyError", "LookupError", "NameError", "NotImplementedError", "OverflowError",
-    "RecursionError", "RuntimeError", "StopIteration", "TypeError", "ValueError", "ZeroDivisionError",
+    "Exception", "RuntimeError", "TypeError", "ValueError",
     # constants
     "True", "False", "None", "NotImplemented", "Ellipsis",
 )
@@ -281,17 +280,16 @@ def _limit_resources(timeout_seconds: float) -> None:
 
 
 def _jsonable(value: Any, depth: int = 0) -> Any:
-    if value is None or isinstance(value, (bool, int, str)):
+    """JSON-safe copy: sets become lists, inf/nan pass through (JSON Infinity/NaN), other objects use str()."""
+    if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else repr(value)
     if depth > 50:
-        return repr(value)
-    if isinstance(value, (list, tuple)):
+        return str(value)
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_jsonable(v, depth + 1) for v in value]
     if isinstance(value, dict):
         return {k if isinstance(k, str) else str(k): _jsonable(v, depth + 1) for k, v in value.items()}
-    return repr(value)
+    return str(value)
 
 
 def _format_user_error(exc: BaseException) -> str:
@@ -320,7 +318,6 @@ def _safe_builtins() -> dict[str, Any]:
         return real_import(name, globals, locals, fromlist, level)
 
     table["__import__"] = guarded_import
-    table["__build_class__"] = builtins.__build_class__
     return table
 
 
@@ -358,7 +355,9 @@ def _child_main() -> None:
         action_results.append(reply.get("action_result"))
         return reply.get("action_result"), reply.get("state")
 
-    namespace: dict[str, Any] = {"__name__": "__main__", "__builtins__": _safe_builtins()}
+    # No __name__: functions defined by the cell get __module__ None and `__name__` is a NameError,
+    # as in the original.
+    namespace: dict[str, Any] = {"__builtins__": _safe_builtins()}
     install_runtime(namespace, request.get("state"), request_actions, request.get("color_chars") or "WwgGcBMPRbSYOrNp")
 
     try:
