@@ -68,7 +68,7 @@ avoid exhaustive searches over huge spaces.
 These names are defined before your code runs:
 - `current_frame` is the board right now (`latest_frame` is the same object). Its attributes:
     `.ascii`          the board as 64 text lines of 64 characters, one character per cell (legend below)
-    `.segmentation`   the board split into connected single-colour regions (described below)
+    `.segmentation`   the board split into connected single-color regions (described below)
     `.level`, `.step` the level number (from 1) and the number of actions played when it was recorded
     `.shape`          (rows, cols), normally (64, 64)
 - `history` is a list, oldest first, of every recorded board. Each entry has `.frame` (a board view like the \
@@ -284,13 +284,13 @@ MAX_LISTED_LABELS = 10
 # board change, state name or action-number span).
 SUMMARY_COUNT = "Your last turn executed {count} {noun}: {labels}."
 OUTCOME_RUN_COMPLETE = "That finished the whole game."
-OUTCOME_NEW_LEVEL = "You completed a level; a new one."
+OUTCOME_NEW_LEVEL = "You completed one level; a new one."
 OUTCOME_SAME_LEVEL = "You are still on the same level."
 GAME_OVER_FACT = "It ended in GAME_OVER and the level was restarted."
 # GAME_OVER while still on the same level: one combined sentence, as the original combines them.
-SAME_LEVEL_GAME_OVER = "GAME_OVER; still on the same level, which restarted."
+SAME_LEVEL_GAME_OVER = "GAME_OVER; still on the same level, that restarted."
 MOUSE_ARGUMENTS = "MOUSE needs integer row and col, each 0 to 63, top row 0."
-NOTHING_EXECUTED = "No action has been executed so far in this new game."
+NOTHING_EXECUTED = "No actions have been executed so far in this new game."
 NOTHING_CAPTURED = "No previous action sequence was captured."
 
 
@@ -299,7 +299,7 @@ def _labels_text(labels: list[str]) -> str:
         return "none"
     shown = ", ".join(labels[:MAX_LISTED_LABELS])
     if len(labels) > MAX_LISTED_LABELS:
-        shown += f", ... (first {MAX_LISTED_LABELS} of {len(labels)} shown)"
+        shown += ", ... (cut)"  # marker length matches the original's (report round 8)
     return shown
 
 
@@ -358,7 +358,7 @@ Keep each line short; long notes crowd out the board history you need later.
 6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
 is reliable, saying what you expect. Stop after any result with level_completed, game_over, \
 run_complete or done set, and look at the new board before playing anything else. Prefer the \
-moves whose result you can predict."""
+moves whose results you can predict."""
 
 
 _TURN_REMINDERS = """Reminders:
@@ -408,7 +408,7 @@ def user_prompt(
 
 
 NOTES_HEADER = (
-    "Your labelled notes, carried over from your earlier replies. Check each line against the current board "
+    "Your labelled notes, carried over from your past replies. Check each line against the current board "
     "and revise them in this reply:"
 )
 

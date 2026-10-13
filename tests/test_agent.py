@@ -914,9 +914,9 @@ ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (repor
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
-# Rewrite serialised sizes after round-7 tuning (a MOUSE game): first turn, later turn without notes, a one-line notes
+# Rewrite serialised sizes after round-9 tuning, paired deltas exactly 0 (a MOUSE game): first turn, later turn without notes, a one-line notes
 # block, corrective. The D2 per-template means they produce are within +/-5 chars of the original's.
-PINNED_TEMPLATE_SIZES = [2817, 2918, 148, 1249]
+PINNED_TEMPLATE_SIZES = [2819, 2919, 145, 1249]
 
 
 def _near(value, target, tolerance=0.10):
@@ -927,8 +927,8 @@ def test_prompt_sizes_are_close_to_the_original():
     assert abs(len(prompts.system_prompt("forced")) - ORIGINAL_SYSTEM_CHARS) <= 30
     system_message = {"role": "system", "content": prompts.system_prompt("forced")}
     serialised = len(json.dumps(system_message, sort_keys=True, ensure_ascii=True))
-    assert abs(serialised - ORIGINAL_SYSTEM_MESSAGE_SERIALISED) <= 5
-    assert abs(len(json.dumps(agent_mod.TOOLS, sort_keys=True, ensure_ascii=True)) - ORIGINAL_TOOLS_CHARS) <= 5
+    assert serialised == ORIGINAL_SYSTEM_MESSAGE_SERIALISED  # exact (report round 9)
+    assert len(json.dumps(agent_mod.TOOLS, sort_keys=True, ensure_ascii=True)) == ORIGINAL_TOOLS_CHARS
     labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
     first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=labels, notes={},
                                 previous_summary=None)
@@ -969,7 +969,7 @@ def test_previous_turn_summary_conveys_the_original_facts_only():
     assert "executed 1 action: UP." in one
     assert "executed 0 actions: none." in _facts({**base, "executed_count": 0, "executed_actions": []})
     many = _facts({**base, "executed_count": 14, "executed_actions": [f"A{i}" for i in range(14)]})
-    assert "A9, ... (first 10 of 14 shown)." in many and "A10" not in many
+    assert "A9, ... (cut)." in many and "A10" not in many
     assert _facts({**base, "level_progressed": True}).endswith(prompts.OUTCOME_NEW_LEVEL)
     # a changed level number without a completed-level result is not "a new level"
     assert _facts({**base, "level": 3}, level=3, max_level_seen=3).endswith(prompts.OUTCOME_SAME_LEVEL)

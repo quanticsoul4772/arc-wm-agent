@@ -133,7 +133,7 @@ PYTHON_TOOL = {
         "name": "python",
         # Length kept close to the original harness's tool definition (equivalence report F4): the
         # estimator counts the tools JSON in every request.
-        "description": "Run one Python cell in a fresh, restricted interpreter that starts with the game state "
+        "description": "Run a Python cell in a fresh, restricted interpreter that starts with the game state "
         "loaded. Nothing survives from earlier cells except definitions the harness keeps for you. "
         "Ready names: current_frame (alias latest_frame) with .ascii, .segmentation, .level, .step and .shape; "
         "history entries with .action and .frame; transitions with .before_frame, .after_frame, .action and "
