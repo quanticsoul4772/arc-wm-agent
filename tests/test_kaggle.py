@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """T5 tests: Kaggle builder, input search, vLLM setup/teardown, gateway simulator, notebook end to end.
 
 Linux only (process groups, /proc). The end-to-end tests need the probe games'

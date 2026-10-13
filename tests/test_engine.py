@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002
 """T1 engine adapter tests (spec 2.1), including the D1 replay of the 30 enf10 runs."""
 from __future__ import annotations
 

@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """Engine adapter: one place that talks to arc_agi / arcengine (spec 2.1).
 
 `Engine` owns the Arcade (offline or competition) and, in competition mode, a

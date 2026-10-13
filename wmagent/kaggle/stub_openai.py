@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """A stub OpenAI-compatible server for local notebook runs without a GPU (stdlib only).
 
 Serves GET /v1/models and POST /v1/chat/completions. Every chat reply carries

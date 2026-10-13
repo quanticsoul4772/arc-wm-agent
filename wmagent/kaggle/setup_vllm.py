@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """Install and start the local vLLM OpenAI server for a Kaggle run (stdlib only).
 
 The builder copies this file to the code bundle root; the notebook loads it with

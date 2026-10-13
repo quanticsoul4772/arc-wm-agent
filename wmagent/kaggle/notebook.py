@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """The Kaggle notebook (`run.ipynb`), as plain-Python cells.
 
 Cells use no IPython magics, so the notebook also runs as a script (the local

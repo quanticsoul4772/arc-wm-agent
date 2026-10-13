@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """Build (and optionally push) the Kaggle code bundle dataset and kernel.
 
     python -m wmagent.kaggle.build --out RUN_DIR --label enf10 [--dry-run] ...

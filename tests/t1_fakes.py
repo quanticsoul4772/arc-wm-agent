@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002
 """Fakes for the T1 engine/runner tests: an in-memory Arcade and environment wrapper."""
 from __future__ import annotations
 

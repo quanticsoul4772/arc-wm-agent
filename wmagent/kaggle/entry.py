@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """The notebook's runner entry point: wires the runner (T1) to the session (T2) and agent (T4).
 
     run(config_dict, output_dir=..., submission=..., notebook_start_epoch=...)

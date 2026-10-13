@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """Local stand-in for the Kaggle competition gateway.
 
 Serves arc_agi's own REST app (`arc_agi.server.create_app`) in competition mode

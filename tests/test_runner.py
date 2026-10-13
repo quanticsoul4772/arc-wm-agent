@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002
 """T1 runner tests (spec 2.2): ordering, concurrency, deadlines, isolation, competition, benchmark.json."""
 from __future__ import annotations
 

@@ -1,4 +1,3 @@
-# ruff: noqa: EXE002 - the mode bit comes from the Windows bind mount, not the file
 """Locate Kaggle inputs by search.
 
 Kaggle has mounted datasets at /kaggle/input/<slug> and at
