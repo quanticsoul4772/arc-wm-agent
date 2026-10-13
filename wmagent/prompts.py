@@ -58,8 +58,9 @@ the board carefully after every move.
 You have exactly one tool, `python`. Each call runs one code cell in a brand-new, locked-down interpreter. \
 Variables, imports and functions from earlier cells are gone when the next cell starts (unless the section on \
 the executable model below says the harness keeps something), so each cell recomputes what it needs. Only a \
-short list of standard modules can be imported: bisect, collections, copy, fractions, functools, heapq, \
-itertools, json, math, operator, random, re, statistics and string. There is no file or network access and \
+short list of standard modules can be imported, grouped here by purpose: for numbers math, fractions, \
+statistics, random and operator; for containers and iteration collections, itertools, heapq, bisect, \
+functools and copy; for text re, string and json. There is no file or network access and \
 no `class` statement; work with functions, tuples, lists and dicts. A cell is stopped after 30 seconds, so \
 avoid exhaustive searches over huge spaces.
 
@@ -319,13 +320,14 @@ current board. For this turn:
 1. Survey the board with python, starting from `current_frame.segmentation`: list the background colours, \
 the small objects, shapes that repeat, and any bars or counters along the edges.
 2. Print ASCII only for small windows around the objects you want to inspect closely.
-3. Write a first version of every labelled line (World model, Goal model, Action model, Recent findings, \
-Open questions, Plan, Cross-level notes), marking guesses as guesses.
+3. Write a first version of every labelled line, from Goal model and World model through Plan, Action \
+model, Open questions, Recent findings and Cross-level notes, marking guesses as guesses.
 4. Choose the single action whose outcome would teach you the most, play it with action(...) at the end \
 of the cell, and say beforehand what you expect it to do.
 5. After it runs, the result dict and the refreshed board are available in the same cell, so you can print a \
 short summary of what changed before the cell ends.
-Keep each cell's printed output short and call python only through the tool interface."""
+6. Look at the whole board, not only the middle: counters, bars and small markers near the edges often tell \
+you how many moves you have or how close you are to finishing, and they are easy to miss on a first look."""
 
 _LATER_TURN_GUIDE = """For this turn:
 1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
@@ -338,8 +340,19 @@ only an edge counter or bar changed.
 5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture.
 6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
 is reliable, and state the outcome you expect. Stop after any result with level_completed, game_over, \
-run_complete or done set, and look at the new board before playing anything else.
-Keep each cell's printed output short and call python only through the tool interface."""
+run_complete or done set, and look at the new board before playing anything else."""
+
+
+_TURN_REMINDERS = """Reminders:
+- Your score on each level depends on how few actions you use, so every move should either test a clear \
+hypothesis or carry out a plan you already trust.
+- Inspect cheaply: segmentation summaries, counts and small ASCII windows rather than whole-board prints, and \
+keep each cell's printed output well under about 1,024 tokens.
+- A list passed to action(...) runs in order and halts on its own at a level completion, a win or GAME_OVER; \
+check the flags in the returned dict before doing anything else in the same cell.
+- Moves played inside a cell are real and cannot be taken back. If you only want to look, leave action(...) \
+out of that cell.
+- Make tool calls only through the function-calling interface; tags or JSON typed into your reply are not run."""
 
 
 def user_prompt(
@@ -368,17 +381,35 @@ def user_prompt(
     if carried:
         lines.append("Your labelled notes from earlier replies (revise them in this reply):\n" + carried)
     lines.append(_FIRST_TURN_GUIDE if first_turn else _LATER_TURN_GUIDE)
+    lines.append(_TURN_REMINDERS)
     return "\n\n".join(lines)
 
 
+_CORRECTIVE_BODY = """Every turn has to end with at least one real move played from inside a python cell. \
+Please continue like this:
+1. Call the python tool to look at the current state. Start from current_frame.segmentation and from the \
+difference between previous_frame and current_frame instead of printing the whole board.
+2. Bring your labelled notes up to date with what you have learned so far, World model and Plan first, so \
+that the next prompt carries them.
+3. In the same cell or a following one, call action(...) with the move you judge most informative, or with a \
+list of moves if the sequence is already reliable, and say what you expect it to do. When unsure what to \
+try, one cheap probe teaches more than another reply without a move.
+Describing a move in prose, or writing code in your reply without calling the tool, plays nothing. Each cell \
+starts fresh with the game state preloaded, so it does not depend on anything you wrote earlier. Keep the \
+printed output of each cell short, well under about 1,024 tokens, so that your context is not used up by \
+tool output, and stop issuing moves once a result reports level_completed, game_over or run_complete."""
+
+
 def corrective_prompt(markup_seen: bool) -> str:
+    """Sent after a reply without any tool call; stricter when tool-call markup was seen in the text."""
     if markup_seen:
         return (
-            "Your reply contained tool-call tags as plain text, and nothing was executed. Use the "
-            "function-calling interface for the `python` tool, with the code in its `code` argument. "
-            "Investigate with python, update your world model, then call action(...) from the cell."
+            "Your reply contained tool-call tags or a JSON call written as plain text, and nothing was "
+            "executed: the game has not moved and this turn is still open. Use the function-calling interface "
+            "for the `python` tool, with the code in its `code` argument, never tags in the reply text. "
+            + _CORRECTIVE_BODY
         )
     return (
-        "You have not taken an action yet. Investigate with python, update your world model, then "
-        "call action(...) inside a python cell."
+        "Nothing was executed in your last reply: it contained no call to the python tool, so the game has "
+        "not moved and this turn is still open. " + _CORRECTIVE_BODY
     )

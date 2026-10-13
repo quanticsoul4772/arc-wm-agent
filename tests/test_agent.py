@@ -797,7 +797,9 @@ def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path
 
 # Sizes measured on the original harness by the equivalence verifier (report F4); eviction depends on them.
 ORIGINAL_SYSTEM_CHARS = 14_065
-ORIGINAL_USER_MEDIAN_CHARS = 2_878
+ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (report F4b)
+ORIGINAL_LATER_USER_CHARS = 3_104
+ORIGINAL_CORRECTIVE_CHARS = 1_278
 ORIGINAL_TOOLS_CHARS = 1_144
 
 
@@ -808,13 +810,37 @@ def _near(value, target, tolerance=0.10):
 def test_prompt_sizes_are_close_to_the_original():
     assert _near(len(prompts.system_prompt("forced")), ORIGINAL_SYSTEM_CHARS)
     assert _near(len(json.dumps(agent_mod.TOOLS)), ORIGINAL_TOOLS_CHARS)
+    labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
+    first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels,
+                                notes={}, previous_summary=None, first_turn=True)
+    assert _near(len(first), ORIGINAL_FIRST_USER_CHARS)
     summary = {"executed_count": 2, "executed_actions": ["UP", "MOUSE(row=12, col=40)"], "start_action_num": 14,
                "end_action_num": 15, "level": 2, "state": "NOT_FINISHED", "board_changed": True}
-    notes = {key: "x" * 70 for key, _ in prompts.NOTE_LABELS}  # a typical carried-notes block (~0.55k chars)
-    text = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15,
-                               valid_actions=["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"], notes=notes,
-                               previous_summary=summary, first_turn=False)
-    assert _near(len(text), ORIGINAL_USER_MEDIAN_CHARS)
+    notes = {key: "x" * 25 for key, _ in prompts.NOTE_LABELS}  # a short carried-notes block
+    later = prompts.user_prompt(step=9, level=2, number_of_levels=7, action_count=15, valid_actions=labels,
+                                notes=notes, previous_summary=summary, first_turn=False)
+    assert _near(len(later), ORIGINAL_LATER_USER_CHARS)
+    assert _near(len(prompts.corrective_prompt(False)), ORIGINAL_CORRECTIVE_CHARS)
+    assert _near(len(prompts.corrective_prompt(True)), ORIGINAL_CORRECTIVE_CHARS, 0.15)
+
+
+def _words(text):
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in text.lower()).split())
+
+
+def test_identifier_lists_are_not_in_canonical_order():
+    """8-gram: the importable modules (alphabetical) and the note labels (canonical order) were listed in the
+    same order as the original's prompts; every prompt text now orders them differently."""
+    texts = [prompts.system_prompt("forced"), prompts.system_prompt("optional"), prompts.RUNTIME_REMINDER,
+             prompts._FIRST_TURN_GUIDE, prompts._LATER_TURN_GUIDE, prompts._TURN_REMINDERS,
+             prompts.corrective_prompt(True), prompts.corrective_prompt(False), json.dumps(agent_mod.TOOLS)]
+    modules = _words(" ".join(sorted(__import__("wmagent.sandbox").sandbox.ALLOWED_MODULES)))
+    labels = _words(" ".join(label for _, label in prompts.NOTE_LABELS))
+    for text in map(_words, texts):
+        for sequence in (modules, labels):
+            tokens = sequence.split()
+            for k in range(len(tokens) - 3):
+                assert " ".join(tokens[k:k + 4]) not in text, (tokens[k:k + 4], text[:60])
 
 
 def test_runtime_reminder_interleaves_the_global_names():
