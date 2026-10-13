@@ -134,14 +134,14 @@ PYTHON_TOOL = {
         # Length kept close to the original harness's tool definition (equivalence report F4): the
         # estimator counts the tools JSON in every request.
         "description": "Run one Python cell in a fresh, restricted interpreter that starts with the game state "
-        "already loaded. Nothing survives from earlier cells except definitions the harness keeps for you. "
+        "loaded. Nothing survives from earlier cells except definitions the harness keeps for you. "
         "Ready names: current_frame (alias latest_frame) with .ascii, .segmentation, .level, .step and .shape; "
         "history entries with .action and .frame; transitions with .before_frame, .after_frame, .action and "
         ".result, plus the shortcuts last_transition, previous_frame, last_action_frame and last_action; "
         "valid_actions; last_action_result; and result, which is returned to you when the cell ends. Call "
         "action('UP'), action({'action': 'MOUSE', 'row': r, 'col': c}) or action([...]) inside the cell to play "
-        "real moves; each call returns a result dict and refreshes the names above. The cell is stopped after 30 seconds, and printed output beyond about 4,000 "
-        "characters is cut off.",
+        "moves; each call returns a result dict and refreshes the names above. The cell is stopped after 30 "
+        "seconds, and printed output beyond about 4,000 characters is cut off.",
         "parameters": {
             "type": "object",
             "properties": {"code": {"type": "string", "description": "Python source for the cell. Print short "

@@ -905,6 +905,8 @@ def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path
 
 # Sizes measured on the original harness by the equivalence verifier (report F4); eviction depends on them.
 ORIGINAL_SYSTEM_CHARS = 13_913  # as measured in D2 (report round 3)
+# The estimator measures ensure_ascii JSON, so eviction depends on serialised sizes (report round 4).
+ORIGINAL_SYSTEM_MESSAGE_SERIALISED = 14_065
 ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (report F4b)
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
@@ -917,7 +919,10 @@ def _near(value, target, tolerance=0.10):
 
 def test_prompt_sizes_are_close_to_the_original():
     assert abs(len(prompts.system_prompt("forced")) - ORIGINAL_SYSTEM_CHARS) <= 30
-    assert _near(len(json.dumps(agent_mod.TOOLS)), ORIGINAL_TOOLS_CHARS)
+    system_message = {"role": "system", "content": prompts.system_prompt("forced")}
+    serialised = len(json.dumps(system_message, sort_keys=True, ensure_ascii=True))
+    assert abs(serialised - ORIGINAL_SYSTEM_MESSAGE_SERIALISED) <= 5
+    assert abs(len(json.dumps(agent_mod.TOOLS, sort_keys=True, ensure_ascii=True)) - ORIGINAL_TOOLS_CHARS) <= 5
     labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
     first = prompts.user_prompt(step=1, level=1, number_of_levels=7, action_count=0, valid_actions=labels,
                                 notes={}, previous_summary=None, first_turn=True)

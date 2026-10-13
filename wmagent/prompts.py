@@ -81,7 +81,7 @@ item: `last_transition` itself (None before your first move), `previous_frame` f
 - `last_action_result` is the dict returned by the most recent move.
 - `result` starts as None. Whatever you assign to it comes back to you with the cell output, which is a \
 compact way to return structured answers.
-- `action(...)` plays real moves in the game (see "Playing moves").
+- `action(...)` plays real moves in the game (see 'Playing moves').
 
 == Colours ==
 Each character in `.ascii` stands for one palette colour:
@@ -105,11 +105,11 @@ small objects, and take the minimum and maximum of the boundary corners to get b
 A survey cell might look like this:
 ```
 from collections import Counter
-nodes = current_frame.segmentation["nodes"]
-print(len(nodes), "regions;", Counter(n["color"] for n in nodes).most_common(6))
-for n in sorted(nodes, key=lambda n: n["pixels"])[:12]:
-    rs = [p[0] for p in n["boundary"]]; cs = [p[1] for p in n["boundary"]]
-    print(n["id"], n["color"], n["pixels"], "rows", min(rs), max(rs), "cols", min(cs), max(cs))
+nodes = current_frame.segmentation['nodes']
+print(len(nodes), 'regions;', Counter(n['color'] for n in nodes).most_common(6))
+for n in sorted(nodes, key=lambda n: n['pixels'])[:12]:
+    rs = [p[0] for p in n['boundary']]; cs = [p[1] for p in n['boundary']]
+    print(n['id'], n['color'], n['pixels'], 'rows', min(rs), max(rs), 'cols', min(cs), max(cs))
 ```
 
 == Seeing what a move did ==
@@ -120,7 +120,7 @@ or meaningless in that position. For example:
 ```
 old = previous_frame.ascii.splitlines(); new = current_frame.ascii.splitlines()
 changed = [(r, c, old[r][c], new[r][c]) for r in range(64) for c in range(64) if old[r][c] != new[r][c]]
-print(len(changed), "cells changed:", changed[:30])
+print(len(changed), 'cells changed:', changed[:30])
 ```
 When many cells change, summarise them by colour pair and bounding box instead of listing every cell.
 
@@ -133,7 +133,7 @@ objects at once, and a click may toggle, rotate or recolour whatever is under it
 progress meter. They change as you act and can look like clickable pieces, but clicking them rarely helps. \
 Check whether they shrink by a fixed amount with every action before treating them as part of the puzzle.
 - Look for relationships: a shape and a matching outline, a coloured key and a door of the same colour, a \
-pattern in one corner and an unfinished copy of it elsewhere. Objectives are often "make this match that".
+pattern in one corner and an unfinished copy of it elsewhere. Objectives are often 'make this match that'.
 
 == Levels and the end of the game ==
 When the level number goes up, the board usually shows a new layout and may add new objects or rules. \
@@ -146,9 +146,9 @@ level: the harness restarts that level before your next turn, and the actions yo
 UP, DOWN, LEFT, RIGHT and SPACE take no arguments. MOUSE is a click on one cell and needs `row` and `col`, \
 each from 0 to 63, where row 0 is the top line of `.ascii` and col 0 is its first character. Only labels \
 present in `valid_actions` are accepted.
-- One move: `action("LEFT")`
-- One click: `action({"action": "MOUSE", "row": 12, "col": 40})`
-- Several moves in order: `action(["UP", "UP", {"action": "MOUSE", "row": 5, "col": 9}])`
+- One move: `action('LEFT')`
+- One click: `action({'action': 'MOUSE', 'row': 12, 'col': 40})`
+- Several moves in order: `action(['UP', 'UP', {'action': 'MOUSE', 'row': 5, 'col': 9}])`
 `action` returns a result dict and refreshes `current_frame`, `history`, `transitions` and the other names in \
 place, so code after the call already sees the new board. Useful result fields: `executed`, `action_num`, \
 `level`, `score`, `state`, `board_changed`, `level_completed`, `game_over`, `run_complete`, `done`, \
@@ -159,7 +159,7 @@ place, so code after the call already sees the new board. Useful result fields: 
 expect to see; afterwards, check whether you were right.
 - While you are still learning, play one move per cell (or a very short probe) and study its effect first.
 - Once a sequence is understood and reliable, send it as one list in a single `action` call rather than one \
-move per cell. That saves turns and context.
+move per cell.
 - A list halts by itself after a move that completes a level, wins the game or ends in GAME_OVER. In your own \
 code, check `level_completed`, `game_over`, `run_complete` and `done` after each call and stop issuing moves \
 as soon as any of them is true; look at the new board before planning further.
@@ -217,8 +217,8 @@ GATE_ADDENDUM_FORCED = """
 == Executable world model (required) ==
 Besides the labelled lines, you must state your understanding as code: a top-level function \
 `def predict(ascii, action)` that takes a board in the `.ascii` text format and an action label, and returns \
-the board text you expect after that action. Labels in transitions look like "UP", "SPACE" or \
-"MOUSE(row=3, col=5)".
+the board text you expect after that action. Labels in transitions look like 'UP', 'SPACE' or \
+'MOUSE(row=3, col=5)'.
 - When a cell that defines `predict` finishes without an error, the harness stores that cell's top-level \
 definitions (functions, constants and imports) and places them before every later cell, so `predict` and its \
 helpers stay available. Define `predict` again to replace it. At the start of a game a placeholder that \
@@ -230,18 +230,18 @@ moves.
 - On each level only a limited number of real actions is allowed before a model is accepted. Beyond that, \
 `action()` raises an error explaining the block until `predict` passes, and a list longer than the remaining \
 allowance is rejected with the number of moves still allowed.
-- Start small: encode the one effect you are sure of (say, "UP moves the red block one row up unless grey is \
-in the way"), return the board unchanged for everything else, and refine as you learn. Check it yourself on \
+- Start small: encode the one effect you are sure of (say, 'UP moves the red block one row up unless grey is \
+in the way'), return the board unchanged for everything else, and refine as you learn. Check it yourself on \
 the recorded moves before relying on the harness, for example:
 ```
 def predict(ascii, action):
     grid = [list(line) for line in ascii.splitlines()]
     # ... apply the effect of `action` to grid ...
-    return "\\n".join("".join(line) for line in grid)
+    return '\\n'.join(''.join(line) for line in grid)
 
 pairs = [t for t in transitions if t.before_frame is not None]
 right = sum(predict(t.before_frame.ascii, t.action) == t.after_frame.ascii for t in pairs)
-print(right, "of", len(pairs), "recorded moves reproduced exactly")
+print(right, 'of', len(pairs), 'recorded moves reproduced exactly')
 ```
 """
 
