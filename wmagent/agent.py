@@ -271,15 +271,18 @@ def _strip_bullets(line: str) -> str:
 
 def extract_notes(text: str) -> dict[str, str]:
     """Labelled notes from assistant content. A label line starts (after `-`/`*` bullets) with the label
-    immediately followed by `:`; other non-blank lines continue the current label, blank lines are skipped,
+    immediately followed by `:`; other non-blank lines continue the current label as written (trimmed only),
+    blank lines are skipped,
     a repeated label appends, and each note is collapsed to one line. A fallback label fills its key only
     when the primary label produced nothing."""
     pieces: dict[str, list[str]] = {}
     current: str | None = None
     for raw in (text or "").splitlines():
-        line = _strip_bullets(raw)
-        if not line:
+        written = raw.strip()
+        if not written:
             continue
+        # bullets are stripped only to test for a label line; a continuation line is kept as written
+        line = _strip_bullets(written)
         lowered = line.lower()
         for label, _key in (*_PRIMARY_LABELS, *_FALLBACK_LABELS):
             if lowered.startswith(label.lower() + ":"):
@@ -291,7 +294,7 @@ def extract_notes(text: str) -> dict[str, str]:
                 break
         else:
             if current is not None:
-                pieces[current].append(line)
+                pieces[current].append(written)
     values = {label: " ".join(" ".join(parts).split()) for label, parts in pieces.items()}
     notes = {key: values[label] for label, key in _PRIMARY_LABELS if values.get(label)}
     for label, key in _FALLBACK_LABELS:

@@ -608,12 +608,19 @@ def test_extract_notes_original_rules():
         "Hypothesis: ignored because World model exists\nHistory check: fills findings\nNext test: fills plan"
     )
     notes = extract_notes(text)
-    assert notes["world"] == ("walls are grey still the world Goal model**: no match Plan : no match "
+    assert notes["world"] == ("walls are grey still the world **Goal model**: no match Plan : no match "
                               "World model (updated): no match second part")
     assert notes["questions"] == "what is red?"
     assert notes["findings"] == "fills findings" and notes["plan"] == "fills plan"
     assert extract_notes("Plan:\n\nHypothesis: h") == {"world": "h"}
     assert extract_notes("intro only\nnothing labelled") == {}
+
+
+def test_continuation_lines_keep_their_bullets():
+    """F17c: bullets are stripped only to test for a label; continuation lines are kept as written."""
+    text = "World model: w\n- **Goal model**: g\n- plain bullet\n* star bullet\n   indented\n\n- after blank"
+    assert extract_notes(text)["world"] == "w - **Goal model**: g - plain bullet * star bullet indented - after blank"
+    assert extract_notes("**Plan:** p\n**Goal model**: g")["plan"] == "** p **Goal model**: g"
 
 
 def test_notes_carried_then_cleared_on_level_transition(tmp_path):
