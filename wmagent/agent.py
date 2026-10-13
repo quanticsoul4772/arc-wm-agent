@@ -349,6 +349,11 @@ def load_runtime_state(path: Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _current_level(state_path: Path) -> int:
+    frame = load_runtime_state(state_path).get("current_frame") or {}
+    return max(1, int(frame.get("level") or 1))
+
+
 def sandbox_state(runtime: dict[str, Any], valid_actions: list[str], last_result: dict[str, Any]) -> dict[str, Any]:
     return {
         "current_frame": _frame_view(runtime.get("current_frame") or {}),
@@ -709,7 +714,7 @@ class ToolAgent:
         except SyntaxError as exc:
             return json.dumps({"tool": "python", "error": _truncate(f"Python syntax error: {exc}", limit)}, indent=2)
 
-        run_python, _refused = self.sandbox()
+        run_python, refused = self.sandbox()
         cell = _Cell()
 
         def handle(actions: Any) -> dict[str, Any]:
@@ -725,11 +730,20 @@ class ToolAgent:
                 }
                 cell.results.append(stub)
                 return {"action_result": stub, "state": self._state(ctx)}
-            # step_env owns the gate's action accounting (observe_level, check_action,
-            # record_actions); a refusal raises ActionRefused out of it, which the sandbox
-            # surfaces to model code as RuntimeError(msg).
+            # The gate's action accounting lives here, as in the original: the level is observed
+            # only before the check, so a level completed by this batch is still scored on the old
+            # level by after_cell. A refusal raises out of the handler and the sandbox surfaces it
+            # to model code as RuntimeError(msg).
+            if self.gate is not None:
+                self.gate.observe_level(_current_level(ctx.state_path))
+                refusal = self.gate.check_action(len(items))
+                if refusal is not None:
+                    raise refused(refusal)
             payload = ctx.step_env({"actions": items})
             result = compact_result(payload)
+            if self.gate is not None:
+                # a failed call (error payload, no executed_count) counts 1, as in the original
+                self.gate.record_actions(int(result.get("executed_count", 1) or 0))
             executed = executed_count_of(payload)
             cell.results.append(result)
             if executed > 0:

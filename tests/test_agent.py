@@ -86,9 +86,7 @@ def _frame(f):
 class FakeGame:
     """Marker on an 8x8 board; UP/DOWN move it. A level completes after `level_len` actions."""
 
-    def __init__(self, tmp_path: Path, level_len: int = 100, levels: int = 3, game_over_at: int | None = None,
-                 gate: WorldModelGate | None = None):
-        self.gate = gate
+    def __init__(self, tmp_path: Path, level_len: int = 100, levels: int = 3, game_over_at: int | None = None):
         self.state_path = tmp_path / "artifacts" / "g1_p0_tool_runtime_state.json"
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.row, self.level, self.levels, self.level_len = 4, 1, levels, level_len
@@ -107,18 +105,8 @@ class FakeGame:
         self.state_path.write_text(json.dumps({"current_frame": self.history[-1]["frame"], "history": self.history}))
 
     def step_env(self, arguments):
-        actions = arguments["actions"]
-        if self.gate is not None:  # the session's step_env owns the gate accounting
-            self.gate.observe_level(self.level)
-            refusal = self.gate.check_action(len(actions))
-            if refusal:
-                raise FakeRefused(refusal)
         self.calls.append(arguments)
-        payload = self._play(actions)
-        if self.gate is not None:
-            self.gate.record_actions(payload.get("executed_count", 0))
-            self.gate.observe_level(self.level)
-        return payload
+        return self._play(arguments["actions"])
 
     def _play(self, actions):
         executed, total_reward, stop_reason = [], 0.0, None
@@ -555,7 +543,7 @@ result = "defined"
 def test_gate_prepend_backtest_refusal_and_log(tmp_path):
     sandbox = FakeSandbox()
     gate = WorldModelGate(probe_actions=1, max_refusals=8)
-    game = FakeGame(tmp_path, gate=gate)
+    game = FakeGame(tmp_path)
     script = [
         tool_call_response('action("UP")'),
         tool_call_response(PREDICT_CELL),
@@ -583,17 +571,57 @@ def test_gate_prepend_backtest_refusal_and_log(tmp_path):
     assert events[0] == "session_start" and "captured" in events and "refused" in events
 
 
-def test_agent_leaves_gate_accounting_to_step_env(tmp_path):
+def test_agent_handler_does_gate_accounting_and_caps_batches(tmp_path):
     game = FakeGame(tmp_path, level_len=2)
     gate = WorldModelGate(probe_actions=1, max_refusals=8)
-    with FakeOpenAIServer([tool_call_response('action(["UP", "UP", "UP"])')]) as server:
+    gate.reset(game.state_path)
+    with FakeOpenAIServer([tool_call_response('action(["UP", "UP", "UP"])'), error_response(503, "end")]) as server:
         agent = _agent(server, gate=gate)
+        agent._state_path = game.state_path
         _analyze(agent, game)
-    # this step_env has no gate, so a batch over PROBE_ACTIONS ran and nothing was counted
-    assert gate.level_actions == 0 and gate.level is None and gate.refusals == 0
-    # the batch stopped at the level completion after 2 of 3 actions
-    tool = json.loads(agent.history[-1]["content"])["action_result"]
-    assert tool["requested_count"] == 3 and tool["executed_count"] == 2 and tool["stopped_early"] is True
+    # the handler observed level 1 and refused the oversized batch before step_env ran
+    assert game.calls == [] and gate.level == 1 and gate.level_actions == 0
+    events = [json.loads(line)["event"] for line in gate.log_path.read_text().splitlines()]
+    assert events == ["session_start", "batch_capped"]
+
+
+def test_level_completing_batch_is_scored_on_the_old_level(tmp_path):
+    """F1: the gate sees the new level only at the next action() call, not right after the batch."""
+    game = FakeGame(tmp_path, level_len=2)
+    gate = WorldModelGate(probe_actions=8, max_refusals=8)
+    gate.reset(game.state_path)
+    levels_at_after_cell = []
+    real_after_cell = gate.after_cell
+
+    def spy(code, errored, backtest):
+        levels_at_after_cell.append(gate.level)
+        return real_after_cell(code, errored, backtest)
+
+    gate.after_cell = spy
+    script = [tool_call_response('action(["UP", "UP"])'), tool_call_response('action("UP")')]
+    with FakeOpenAIServer(script) as server:
+        agent = _agent(server, gate=gate)
+        agent._state_path = game.state_path
+        _analyze(agent, game, 1)
+        assert game.level == 2
+        assert gate.level == 1 and gate.level_actions == 2
+        _analyze(agent, game, 2)
+    assert levels_at_after_cell == [1, 2]
+    assert gate.level == 2 and gate.level_actions == 1
+
+
+def test_failed_action_calls_count_one_toward_the_gate_budget(tmp_path):
+    """F3: an error payload has no executed_count, so it counts 1, as in the original."""
+    game = FakeGame(tmp_path)
+    gate = WorldModelGate(probe_actions=8, max_refusals=8)
+    gate.reset(game.state_path)
+    code = 'action("LEFT")\naction(["UP", "DOWN"])\naction("UP")'
+    with FakeOpenAIServer([tool_call_response(code)]) as server:
+        agent = _agent(server, gate=gate)
+        agent._state_path = game.state_path
+        _analyze(agent, game)
+    # LEFT is invalid in FakeGame (error payload): 1; the 2-action batch: 2; the single UP: 1
+    assert gate.level_actions == 4
 
 
 def test_optional_gate_prepends_simulate(tmp_path):

@@ -5,7 +5,8 @@ Spec: track2-rewrite-spec-2026-10-13.md, section 2.3 (behaviour) and 2.7 (equiva
 The session sits between three other modules:
 - the started game from the engine adapter (T1), used through the `SessionGame` protocol below;
 - the agent (T4), used through the `SessionAgent` protocol below;
-- the world-model gate (ours, `world_model_gate.py`), consulted inside `step_env` when one is attached.
+- the world-model gate (ours, `world_model_gate.py`) is NOT consulted here: the agent's `action()` handler
+  does all of the gate's action accounting (observe_level, check_action, record_actions), as in the original.
 """
 
 from __future__ import annotations
@@ -182,7 +183,6 @@ class GameSession:
     max_actions: int | None = None
     analyzer_timeout_s: float = 900.0
     deadline_monotonic: float | None = None
-    gate: WorldModelGate | None = None
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     play_started: float | None = None  # clock() value when play began (slot acquired); set by run() if None
@@ -198,7 +198,7 @@ class GameSession:
     # --- turn loop ---------------------------------------------------------
 
     @classmethod
-    def from_context(cls, ctx: PlayContextLike, agent: SessionAgent, gate: WorldModelGate | None = None) -> GameSession:
+    def from_context(cls, ctx: PlayContextLike, agent: SessionAgent) -> GameSession:
         """Build a session from the runner's PlayContext; the time cap counts from ctx.play_started."""
         return cls(
             game=ctx.game,
@@ -211,7 +211,6 @@ class GameSession:
             max_actions=ctx.max_actions,
             analyzer_timeout_s=ctx.analyzer_timeout_s,
             deadline_monotonic=ctx.soft_deadline,
-            gate=gate,
             play_started=ctx.play_started,
         )
 
@@ -290,12 +289,6 @@ class GameSession:
         if self.should_stop() or self._observed_state() == GameState.GAME_OVER:
             return self._terminal()
 
-        if self.gate is not None:
-            self.gate.observe_level(self._level())
-            refusal = self.gate.check_action(len(requests))
-            if refusal is not None:
-                raise ActionRefused(refusal)
-
         payloads: list[dict[str, Any]] = []
         stop_reason: str | None = None
         stop_detail: str | None = None
@@ -324,10 +317,6 @@ class GameSession:
                     break
             if stop_reason is not None:
                 break
-
-        if self.gate is not None:
-            self.gate.record_actions(len(payloads))
-            self.gate.observe_level(self._level())
 
         if not payloads:
             return self._terminal(stop_reason or "stopped", stop_detail)
@@ -576,20 +565,16 @@ def make_play(
 ) -> Callable[[PlayContextLike], None]:
     """The runner's `play(ctx)` callable: one fresh agent (and optional gate) per game copy.
 
-    The session and the agent must share ONE gate: the session does the action accounting
-    (observe_level / check_action / record_actions) and the agent stores and backtests the
-    model code (prepend / after_cell). Without a gate_factory the session uses the agent's
-    own gate (ToolAgent builds it from PROBE_*), so the two never diverge.
+    The gate lives in the agent only: its `action()` handler does the action accounting
+    (observe_level / check_action / record_actions) and it stores and backtests the model
+    code (prepend / after_cell). A gate_factory replaces the agent's own gate (ToolAgent
+    builds one from PROBE_*).
     """
 
     def play(ctx: PlayContextLike) -> None:
         agent = agent_factory()
-        if gate_factory is not None:
-            gate = gate_factory()
-            if hasattr(agent, "gate"):
-                agent.gate = gate
-        else:
-            gate = getattr(agent, "gate", None)
-        GameSession.from_context(ctx, agent, gate).run()
+        if gate_factory is not None and hasattr(agent, "gate"):
+            agent.gate = gate_factory()
+        GameSession.from_context(ctx, agent).run()
 
     return play

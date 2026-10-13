@@ -18,12 +18,10 @@ from wmagent.session import (
     BATCH_PAYLOAD_KEYS,
     ERROR_PAYLOAD_KEYS,
     TERMINAL_PAYLOAD_KEYS,
-    ActionRefused,
     GameSession,
     SessionCrashed,
     make_play,
 )
-from wmagent.world_model_gate import WorldModelGate
 
 SIMPLE = [1, 2, 3, 4, 5, 6]  # ACTION7 is deliberately not available
 
@@ -483,28 +481,16 @@ def test_win_ends_loop_and_final_tokens_go_to_finish(tmp_path):
     assert game.solver_note == "tokens=94"
 
 
-# --- world-model gate hook points ---------------------------------------------------------
+# --- the gate is not consulted by step_env ------------------------------------------------
 
 
-def test_gate_caps_batches_refuses_and_resets_on_level_change(tmp_path):
-    gate = WorldModelGate(probe_actions=3, max_refusals=1)
+def test_step_env_does_no_gate_accounting(tmp_path):
+    """The agent's action() handler owns the gate (F1/F3); step_env runs batches of any size."""
     game = FakeGame(effects={"ACTION2": "level"})
-    session = _session(tmp_path, game, gate=gate)
-    gate.reset(session.state_path)
-
-    with pytest.raises(ActionRefused, match="at most 3"):
-        session.step_env({"actions": [{"action": "UP"}] * 4})
-    assert game.calls == []
-    session.step_env({"actions": [{"action": "UP"}, {"action": "LEFT"}]})
-    assert gate.level_actions == 2
-    session.step_env({"action": "UP"})
-    with pytest.raises(ActionRefused, match="blocked"):
-        session.step_env({"action": "UP"})
-    session.step_env({"action": "DOWN"})  # second refusal releases the level; DOWN completes it
-    assert gate.level == 2 and gate.level_actions == 0 and not gate.released
-    log = [json.loads(line)["event"] for line in gate.log_path.read_text().splitlines()]
-    assert log == ["session_start", "batch_capped", "refused", "released_sim_free", "level_change"]
-    assert gate.log_path.name == "fake-0001_p0_wm_gate.jsonl"
+    session = _session(tmp_path, game)
+    assert not hasattr(session, "gate")
+    result = session.step_env({"actions": [{"action": "UP"}] * 4 + [{"action": "DOWN"}]})
+    assert result["executed_count"] == 5 and result["level_completed"] is True
 
 
 def test_make_play_builds_session_from_runner_context(tmp_path):
