@@ -63,12 +63,12 @@ same ideas with more pieces, more obstacles or an extra twist.
 - The score rewards efficiency: finishing a level in about as many actions as the reference solution is \
 good, finishing faster is better, and every wasted move lowers the result. Not finishing a level scores \
 nothing for that level and blocks all later ones, so first make sure you can finish, then make it short.
-- The board you see is the whole state that matters, plus anything the game shows indirectly through \
-counters or bars. There is no hidden text, no score display you need to read, and no instructions inside \
-the game; everything has to be inferred from how the board responds.
+- Clicks and directions can both be available in one game. Check `valid_actions` on each turn, because the set \
+of usable labels can change from one level to the next.
 - A move can change many cells at once, change nothing, or change only a counter. All three outcomes are \
 information about the rules.
-- Actions are discrete and the game waits for you: nothing moves between your actions.
+- Colours tend to keep their meaning within a game, for example one for walls, one for the piece you move and \
+one for targets, so a colour key you work out early keeps paying off in later turns.
 - Some games show progress on the board itself, for example a target pattern that fills in or a piece count \
 that drops; finding that signal early on makes every later decision much simpler.
 - The level number, the step count and the actions you executed are reported in each turn's prompt, so you \

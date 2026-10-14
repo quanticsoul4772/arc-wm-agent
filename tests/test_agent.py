@@ -731,7 +731,9 @@ def test_system_prompt_parity_items_round_11():
     for fact in ("stop probing and search", "tells them apart", "absolute row or column", "do not ration calls",
                  "DO NOT CLICK THE SEGMENTS"):
         assert fact in system, fact
-    for absent in ("only memory", "is cleared", "copied into your next prompt", "== Keeping a world model"):
+    # round 12: no claims that make board-to-board prediction look feasible (the original states neither)
+    for absent in ("only memory", "is cleared", "copied into your next prompt", "== Keeping a world model",
+                   "whole state that matters", "nothing moves between", "game waits for you"):
         assert absent not in system, absent
     later = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP"], notes={},
                                 previous_summary={"executed_count": 1, "executed_actions": ["UP"], "level": 1})
