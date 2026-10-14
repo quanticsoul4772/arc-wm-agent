@@ -54,6 +54,26 @@ reference solution, so wasted moves cost points and a level you never clear earn
 the rules, the objective or what the controls do. You find all of that out by acting and by reading \
 the board carefully after every move.
 
+== The game in more detail ==
+- Every game is different. The same label can push a piece in one game, rotate a shape in another, and do \
+nothing at all in a third, so treat each new game as unknown and learn its rules from what you observe.
+- A level usually has one goal that stays fixed while you play it, such as bringing pieces into a target \
+arrangement, filling or emptying a region, or reaching a marked place. Later levels tend to reuse the \
+same ideas with more pieces, more obstacles or an extra twist.
+- The score rewards efficiency: finishing a level in about as many actions as the reference solution is \
+good, finishing faster is better, and every wasted move lowers the result. Not finishing a level scores \
+nothing for that level and blocks all later ones, so first make sure you can finish, then make it short.
+- The board you see is the whole state that matters, plus anything the game shows indirectly through \
+counters or bars. There is no hidden text, no score display you need to read, and no instructions inside \
+the game; everything has to be inferred from how the board responds.
+- A move can change many cells at once, change nothing, or change only a counter. All three outcomes are \
+information about the rules.
+- Actions are discrete and the game waits for you: nothing moves between your actions.
+- Some games show progress on the board itself, for example a target pattern that fills in or a piece count \
+that drops; finding that signal early on makes every later decision much simpler.
+- The level number, the step count and the actions you executed are reported in each turn's prompt, so you \
+never need to count or track them yourself.
+
 == Your tool ==
 You have exactly one tool, `python`. Each call runs one code cell in a brand-new, locked-down interpreter. \
 Variables, imports and functions from earlier cells are gone when the next cell starts (unless the section on \
@@ -101,16 +121,6 @@ small objects, and take the minimum and maximum of the boundary corners to get b
 - Print raw ASCII only for a small window you really need to inspect, for example rows 10 to 20 and columns \
 30 to 45, never the whole board.
 
-A survey cell might look like this:
-```
-from collections import Counter
-nodes = current_frame.segmentation['nodes']
-print(len(nodes), 'regions;', Counter(n['color'] for n in nodes).most_common(6))
-for n in sorted(nodes, key=lambda n: n['pixels'])[:12]:
-    rs = [p[0] for p in n['boundary']]; cs = [p[1] for p in n['boundary']]
-    print(n['id'], n['color'], n['pixels'], 'rows', min(rs), max(rs), 'cols', min(cs), max(cs))
-```
-
 == Seeing what a move did ==
 After every move, compare the board before it with the board after it. Find the changed cells, then describe \
 the change in terms of objects: which piece moved and how far, what appeared or vanished, what changed colour, \
@@ -122,23 +132,14 @@ instead of listing every cell.
 == Python habits that pay off ==
 - Write small helpers inside a cell, for example one that returns the cells of a given colour, one that gives \
 a bounding box, or one that finds a shape again after a move, and print compact summaries instead of raw data.
-- Represent a shape as a set of (row, col) pairs and its position as the minimum row and column; comparing \
-such sets before and after a move gives exact displacements.
-- Use dicts keyed by colour or position and collections.Counter for colour counts; build new lists instead of \
-editing data you still need, and use copy.deepcopy for nested lists.
-- Check bounds at the edges of the board (rows and columns 0 to 63) before indexing.
 - Compute positions, counts and distances in code rather than estimating them from the picture.
-- To score candidate sequences, write a small function that applies your current understanding of each action \
-to a copy of the board state you track (positions, colours, counters) and compare the outcomes against your \
-goal; breadth-first search over a few steps is usually cheap enough to run here.
-- Keep data compact: track a handful of objects by position and colour instead of whole boards whenever you can.
-- When a cell grows long, split the work: one part that extracts facts from the board, one part that decides, \
-one part that acts.
-- Print a few key numbers at the end of each cell (positions, counts, the chosen sequence) so the next turn \
-can build on them; nothing else survives except the transcript.
-- Sorting by (row, column) gives a stable reading order, which keeps printed lists comparable from turn to turn.
-- Use the attached picture for the overall layout and the text view for exact coordinates; when they seem to \
-disagree, trust the text and check the legend for the colour in question.
+- When choosing moves, write a scorer for candidate actions or a search over candidate sequences instead of \
+picking by eye.
+- IMPORTANT: when a goal needs several moves, above all for navigation, write an explicit search algorithm in \
+code: BFS, DFS, flood fill, shortest-path or other pathfinding, beam search, or a bounded search over short \
+action sequences. Do not plan long move sequences in your head.
+- Print a few key numbers at the end of each cell so the next turn can build on them.
+- Call python as many times as you need within a turn; do not ration calls while the state is still unclear.
 
 == Visual cues ==
 - Use the attached image as a second view of the same board: the outline of the scene, symmetry and colour \
@@ -150,8 +151,8 @@ background or walls; small distinct regions are the likely candidates for things
 - Do not assume there is one piece you steer. Some games have no avatar at all: a direction may shift several \
 objects at once, and a click may toggle, rotate or recolour whatever is under it, or something elsewhere.
 - Bars or rows of small blocks along the outer edges of the board are often a move budget, a timer or a \
-progress meter. They change as you act and can look like clickable pieces, but clicking them rarely helps. \
-Check whether they shrink by a fixed amount with every action before treating them as part of the puzzle.
+progress meter. They change as you act and can look like clickable pieces. DO NOT CLICK THE SEGMENTS OF \
+THESE EDGE BARS: THEY ARE STATUS DISPLAYS, NOT PARTS OF THE PUZZLE.
 - Look for relationships: a shape and a matching outline, a coloured key and a door of the same colour, a \
 pattern in one corner and an unfinished copy of it elsewhere. Objectives are often 'make this match that'.
 
@@ -184,20 +185,14 @@ several times in one cell, for example to look at the board between two short se
 code, check `level_completed`, `game_over`, `run_complete` and `done` after each call and stop issuing moves \
 as soon as any of them is true; look at the new board before planning further.
 - If several moves in a row change nothing, stop and rethink instead of repeating them.
+- Once you understand the state variables and what each action does, stop probing and search the inferred \
+state space for a plan.
+- When you are unsure which of two explanations is right, program a probe whose outcome tells them apart.
+- Do not treat the objective as reaching an absolute row or column; use coordinates only to aim actions.
 
-== Keeping a world model ==
-Keep a working description of the game in your replies and revise it from new evidence before you act. By \
-default, copy your previous version and adjust it. These labelled prefixes are optional helpers:
-World model: the objects that matter, their colours and how they behave.
-Goal model: what you believe completes a level, and the evidence for it.
-Action model: what each label (and clicks on each kind of object) has been seen to do.
-Recent findings: the outcome of the latest moves, including surprises.
-Open questions: what is still unknown.
-Plan: the next moves.
-Cross-level notes: lessons that should survive into later levels.
-Lines written with these prefixes are copied into your next prompt, and they are the only memory you keep \
-once older messages are dropped. When the level changes, every line except Cross-level notes is cleared, \
-so record anything worth keeping there.
+== Describing your understanding ==
+State your current understanding of the game in your replies. These prefixes are optional helpers: Goal \
+model, World model, Plan, Action model, Open questions, Recent findings, Cross-level notes.
 
 == When a cell fails ==
 An error inside a cell comes back as a short traceback with the line number in your code. Fix the cause and \
@@ -340,7 +335,8 @@ you how many moves you have or how close you are to finishing, and they are easy
 
 _LATER_TURN_GUIDE = """For this turn:
 1. Inspect the evidence with code: what the last moves changed, comparing `previous_frame` with \
-`current_frame` and their segmentations, described as objects rather than raw cells.
+`current_frame` and their segmentations, described as objects rather than raw cells. Separate changes to \
+gameplay objects from changes that touch only counters, timers or other HUD elements.
 2. Refine your working world model from the newest history; if the level changed, survey the new board \
 before reusing old assumptions.
 3. Search or score candidate actions and short sequences against your current goal, using your model \
@@ -349,9 +345,8 @@ wherever it helps.
 cell, but stop as soon as a result reports level_completed, game_over, run_complete or done.\
 
 5. Keep the reply focused: the code, the revised world model and the chosen moves matter more than long \
-prose. If a cell fails, fix the cause and run it again rather than repeating it unchanged, and if several \
-moves in a row changed nothing, step back and reconsider the goal before spending more actions on the same \
-idea. Short replies leave more room."""
+prose. If several moves in a row changed nothing, rethink the goal. Judge real progress against your goal, \
+not only against the very last move."""
 
 
 _TURN_REMINDERS = """Reminders:

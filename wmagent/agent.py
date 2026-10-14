@@ -508,7 +508,7 @@ class _Truncator:
         if self.cut:
             body["truncated"] = True
             body["truncation_note"] = (
-                f"Output was cut off to stay within the roughly {tokens}-token output budget."
+                f"Tool output beyond about {tokens} tokens was dropped; print less next time."
             )
         return body
 

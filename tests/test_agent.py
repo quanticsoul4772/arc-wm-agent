@@ -461,7 +461,7 @@ def test_tool_output_truncated(tmp_path):
         _analyze(agent, game)
     body = json.loads(agent.history[-1]["content"])
     assert body["stdout"].startswith("z" * 4096) and body["stdout"].endswith("[truncated 4904 chars]")
-    assert body["truncated"] is True and "1024-token" in body["truncation_note"]
+    assert body["truncated"] is True and "1024 tokens" in body["truncation_note"]
 
 
 def test_new_state_path_resets_session(tmp_path):
@@ -718,6 +718,26 @@ def test_gate_section_states_interface_and_rules_only():
     assert "score candidate actions and short sequences" in system
 
 
+def test_system_prompt_parity_items_round_11():
+    """Parity review (report 83d1820): generic scorer/search guidance with an emphasised search instruction,
+    no concrete simulation hint or data-structure tips, the restored probing/search facts, an uppercase
+    edge-bar warning, and no notes-memory facts."""
+    system = prompts.system_prompt("forced", 8)
+    habits = system[system.index("== Python habits"):system.index("== Visual cues")]
+    assert "scorer for candidate actions or a search over candidate sequences" in habits
+    assert "IMPORTANT:" in habits and "BFS" in habits and "explicit search algorithm" in habits
+    for absent in ("copy of the board state", "(row, col) pairs", "deepcopy", "Counter", "breadth-first search over"):
+        assert absent not in habits, absent
+    for fact in ("stop probing and search", "tells them apart", "absolute row or column", "do not ration calls",
+                 "DO NOT CLICK THE SEGMENTS"):
+        assert fact in system, fact
+    for absent in ("only memory", "is cleared", "copied into your next prompt", "== Keeping a world model"):
+        assert absent not in system, absent
+    later = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP"], notes={},
+                                previous_summary={"executed_count": 1, "executed_actions": ["UP"], "level": 1})
+    assert "HUD elements" in later and "gameplay objects" in later
+
+
 def test_world_model_mandate_precedes_the_carried_notes():
     """Item 5: an emphasised copy-and-adjust instruction sits right before the notes on later turns."""
     summary = {"executed_count": 1, "executed_actions": ["UP"], "level": 1}
@@ -904,7 +924,7 @@ def test_truncation_marks_the_payload_once():
     assert out["error"] == "e" * 256 + "\n... [truncated 44 chars]"
     assert out["stdout"].endswith("[truncated 144 chars]")
     assert list(out)[-2:] == ["truncated", "truncation_note"] and out["truncated"] is True
-    assert "64-token" in out["truncation_note"]
+    assert "64 tokens" in out["truncation_note"]
     # same serialised length as the original's note (report round 7: it counts toward eviction)
     note = json.loads(agent_mod.format_tool_result({"stdout": "s" * 5000}, [], 4096, 1024))["truncation_note"]
     assert len(json.dumps(note)) - 2 == 71
