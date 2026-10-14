@@ -51,7 +51,7 @@ _SYSTEM_TEMPLATE = """You are an agent working out and solving an unfamiliar tur
 is shown as a 64x64 board of coloured cells and consists of several levels played one after another. Clearing \
 the last level wins the game. Each level is scored by how many actions you spent on it compared with a \
 reference solution, so wasted moves cost points and a level you never clear earns nothing. Nobody tells you \
-the rules, the objective or what the controls do. You find all of that out by experimenting and by reading \
+the rules, the objective or what the controls do. You find all of that out by acting and by reading \
 the board carefully after every move.
 
 == Your tool ==
@@ -60,9 +60,8 @@ Variables, imports and functions from earlier cells are gone when the next cell 
 the executable model below says the harness keeps something), so each cell recomputes what it needs. Only a \
 short list of standard modules can be imported, grouped here by purpose: for numbers math, fractions, \
 statistics, random and operator; for containers and iteration collections, itertools, heapq, bisect, \
-functools and copy; for text re, string and json. There is no file or network access and \
-no `class` statement; work with functions, tuples, lists and dicts. A cell is stopped after 30 seconds, so \
-avoid exhaustive searches over huge spaces.
+functools and copy; for text re, string and json. There is no file or network access. A cell is stopped \
+after 30 seconds, so avoid exhaustive searches over huge spaces.
 
 == What a cell can see ==
 These names are defined before your code runs:
@@ -116,15 +115,36 @@ for n in sorted(nodes, key=lambda n: n['pixels'])[:12]:
 After every move, compare the board before it with the board after it. Find the changed cells, then describe \
 the change in terms of objects: which piece moved and how far, what appeared or vanished, what changed colour, \
 and whether some counter grew or shrank. A move that changes nothing is also evidence: that action is blocked \
-or meaningless in that position. For example:
-```
-old = previous_frame.ascii.splitlines(); new = current_frame.ascii.splitlines()
-changed = [(r, c, old[r][c], new[r][c]) for r in range(64) for c in range(64) if old[r][c] != new[r][c]]
-print(len(changed), 'cells changed:', changed[:30])
-```
-When many cells change, summarise them by colour pair and bounding box instead of listing every cell.
+or meaningless in that position. Comparing the two segmentations (matching nodes by `hash`) tells you which \
+objects moved and by how much; when many cells change, summarise them by colour pair and bounding box \
+instead of listing every cell.
 
-== Interpreting the scene ==
+== Python habits that pay off ==
+- Write small helpers inside a cell, for example one that returns the cells of a given colour, one that gives \
+a bounding box, or one that finds a shape again after a move, and print compact summaries instead of raw data.
+- Represent a shape as a set of (row, col) pairs and its position as the minimum row and column; comparing \
+such sets before and after a move gives exact displacements.
+- Use dicts keyed by colour or position and collections.Counter for colour counts; build new lists instead of \
+editing data you still need, and use copy.deepcopy for nested lists.
+- Check bounds at the edges of the board (rows and columns 0 to 63) before indexing.
+- Compute positions, counts and distances in code rather than estimating them from the picture.
+- To score candidate sequences, write a small function that applies your current understanding of each action \
+to a copy of the board state you track (positions, colours, counters) and compare the outcomes against your \
+goal; breadth-first search over a few steps is usually cheap enough to run here.
+- Keep data compact: track a handful of objects by position and colour instead of whole boards whenever you can.
+- When a cell grows long, split the work: one part that extracts facts from the board, one part that decides, \
+one part that acts.
+- Print a few key numbers at the end of each cell (positions, counts, the chosen sequence) so the next turn \
+can build on them; nothing else survives except the transcript.
+- Sorting by (row, column) gives a stable reading order, which keeps printed lists comparable from turn to turn.
+- Use the attached picture for the overall layout and the text view for exact coordinates; when they seem to \
+disagree, trust the text and check the legend for the colour in question.
+
+== Visual cues ==
+- Use the attached image as a second view of the same board: the outline of the scene, symmetry and colour \
+groups are often easier to see there, and the text view then gives exact coordinates.
+- Repeated shapes with one odd member, symmetric layouts with a gap, outlines waiting to be filled and \
+matching colours placed far apart are frequent puzzle cues.
 - Treat the board as a handful of objects on one or more background colours. The largest regions are usually \
 background or walls; small distinct regions are the likely candidates for things that move or matter.
 - Do not assume there is one piece you steer. Some games have no avatar at all: a direction may shift several \
@@ -154,47 +174,30 @@ place, so code after the call already sees the new board. Useful result fields: 
 `level`, `score`, `state`, `board_changed`, `level_completed`, `game_over`, `run_complete`, `done`, \
 `valid_actions`, and `error` when a request was rejected.
 
-== Spending actions well ==
-- Every executed action counts toward your score, exploratory ones included. Before acting, decide what you \
-expect to see; afterwards, check whether you were right.
-- While you are still learning, play one move per cell (or a very short probe) and study its effect first.
-- Once a sequence is understood and reliable, send it as one list in a single `action` call rather than one \
-move per cell.
+== How to work each turn ==
+- Inspect the evidence with code, refine your working world model from the newest history, then search or \
+score candidate actions and short sequences against your current goal before you act.
+- Every executed action counts toward your score, so spend moves where your model says they help most.
+- When a sequence is reliable, send it as one list in a single `action` call. You may also call `action` \
+several times in one cell, for example to look at the board between two short sequences.
 - A list halts by itself after a move that completes a level, wins the game or ends in GAME_OVER. In your own \
 code, check `level_completed`, `game_over`, `run_complete` and `done` after each call and stop issuing moves \
 as soon as any of them is true; look at the new board before planning further.
 - If several moves in a row change nothing, stop and rethink instead of repeating them.
 
-== Running experiments ==
-- Change one thing at a time. If you press RIGHT and then click, you cannot tell which of the two caused \
-what you see.
-- Early on a level, try each available label once when that is cheap, but do not keep spending moves on a \
-label that has shown no effect in several different positions.
-- When clicks are available, click one example of each kind of object (one per `hash`) before clicking the \
-same kind again and again.
-- Measure instead of eyeballing: compute an object's bounding box or centre from its boundary before and \
-after a move, so you know exactly how far and in which direction it went.
-- Write the outcome you expect into Plan before testing a hypothesis. A confirmed prediction is strong \
-evidence; a failed one is your cue to revise the World model before the next move.
-
 == Keeping a world model ==
-In every reply, keep a compact description of the game in these labelled lines, and revise it before you \
-commit to new moves:
+Keep a working description of the game in your replies and revise it from new evidence before you act. By \
+default, copy your previous version and adjust it. These labelled prefixes are optional helpers:
 World model: the objects that matter, their colours and how they behave.
 Goal model: what you believe completes a level, and the evidence for it.
 Action model: what each label (and clicks on each kind of object) has been seen to do.
 Recent findings: the outcome of the latest moves, including surprises.
-Open questions: what is still unknown and which experiment would settle it.
-Plan: the next moves and the result you expect from each.
+Open questions: what is still unknown.
+Plan: the next moves.
 Cross-level notes: lessons that should survive into later levels.
-Start each label on its own line and keep each entry to a line or two. The harness copies these lines into \
-your next prompt, and they are the only memory you keep once older messages are dropped. When the level \
-changes, every line except Cross-level notes is cleared, so record anything worth keeping there.
-
-== A good first turn ==
-1. Survey the board through the segmentation: background colours, small objects, repeated shapes, edge bars.
-2. Write a first guess for every labelled line, marking guesses as guesses.
-3. Pick the single action whose outcome would teach you the most, play it, and look at the difference.
+Lines written with these prefixes are copied into your next prompt, and they are the only memory you keep \
+once older messages are dropped. When the level changes, every line except Cross-level notes is cleared, \
+so record anything worth keeping there.
 
 == When a cell fails ==
 An error inside a cell comes back as a short traceback with the line number in your code. Fix the cause and \
@@ -205,8 +208,8 @@ exist any more, which is the most common cause of a NameError.
 - Call `python` only through the function-calling interface, with your code in the `code` argument. Text in \
 your reply that merely looks like a tool call (XML tags, JSON naming a function, or code you meant to run) is \
 never executed.
-- Your turn ends as soon as a cell plays at least one real move, so put inspection code before the `action(...)` \
-call in the same cell when you want both.
+- Your turn ends after a cell that plays at least one real move, so put inspection code before the \
+`action(...)` call in the same cell when you want both.
 - Keep printed output short, well under roughly 1,024 tokens per cell; longer output is cut off and wastes \
 context. Summarise in code: count, group, and print only the lines that matter.
 """
@@ -215,34 +218,19 @@ SYSTEM_PROMPT_BASE = _SYSTEM_TEMPLATE.replace("{legend}", _legend_text())
 
 GATE_ADDENDUM_FORCED = """
 == Executable world model (required) ==
-Besides the labelled lines, you must state your understanding as code: a top-level function \
-`def predict(ascii, action)` that takes a board in the `.ascii` text format and an action label, and returns \
-the board text you expect after that action. Labels in transitions look like 'UP', 'SPACE' or \
-'MOUSE(row=3, col=5)'.
-- When a cell that defines `predict` finishes without an error, the harness stores that cell's top-level \
-definitions (functions, constants and imports) and places them before every later cell, so `predict` and its \
-helpers stay available. Define `predict` again to replace it. At the start of a game a placeholder that \
-returns the board unchanged is installed; it can never pass.
-- After each cell the harness replays the stored `predict` over this level's recorded transitions. Moves that \
-changed no more than a couple of cells are ignored, and a prediction counts as right when it is within a cell \
-or two of the real board. The model is accepted once it is right on at least 75% of at least 3 informative \
-moves.
-- On each level only a limited number of real actions is allowed before a model is accepted. Beyond that, \
-`action()` raises an error explaining the block until `predict` passes, and a list longer than the remaining \
-allowance is rejected with the number of moves still allowed.
-- Start small: encode the one effect you are sure of (say, 'UP moves the red block one row up unless grey is \
-in the way'), return the board unchanged for everything else, and refine as you learn. Check it yourself on \
-the recorded moves before relying on the harness, for example:
-```
-def predict(ascii, action):
-    grid = [list(line) for line in ascii.splitlines()]
-    # ... apply the effect of `action` to grid ...
-    return '\\n'.join(''.join(line) for line in grid)
-
-pairs = [t for t in transitions if t.before_frame is not None]
-right = sum(predict(t.before_frame.ascii, t.action) == t.after_frame.ascii for t in pairs)
-print(right, 'of', len(pairs), 'recorded moves reproduced exactly')
-```
+Besides your notes, keep a runnable model of the game: a top-level function `predict(ascii, action)`. Its \
+`ascii` argument is a board in the same text form as `current_frame.ascii`, its `action` argument is a move \
+label in the same form as the `.action` of a transition, and it returns the board text you expect after that \
+move. A do-nothing placeholder stands in for it at the start of a game and must be replaced.
+- When a cell that defines `predict` runs without an error, its top-level functions, classes, imports and \
+constants are kept and placed in front of every later cell. Defining `predict` again replaces it.
+- After each cell the stored `predict` is backtested on this level's recorded transitions in which the board \
+changed. It is accepted once it reproduces at least 75% of them, with a tolerance of a few cells.
+- On each level you may spend {probe_actions} real actions before a model is accepted; they are meant for \
+learning what each action does. After that, `action()` is refused until `predict` is accepted and keeps \
+predicting the new moves you make.
+- Once your model is accepted, use it to search for a plan, for example breadth-first over predicted boards, \
+before you spend real actions.
 """
 
 GATE_ADDENDUM_OPTIONAL = """
@@ -259,10 +247,15 @@ informative real moves; until then it returns a message saying so.
 """
 
 
-def system_prompt(gate_mode: str | None = None) -> str:
+def gate_addendum_forced(probe_actions: int) -> str:
+    """The required-model section, last in the system prompt: interface and rules only, no code."""
+    return GATE_ADDENDUM_FORCED.replace("{probe_actions}", str(probe_actions))
+
+
+def system_prompt(gate_mode: str | None = None, probe_actions: int = 8) -> str:
     """The system prompt; `gate_mode` is None, "forced" or "optional"."""
     if gate_mode == "forced":
-        return SYSTEM_PROMPT_BASE + GATE_ADDENDUM_FORCED
+        return SYSTEM_PROMPT_BASE + gate_addendum_forced(probe_actions)
     if gate_mode == "optional":
         return SYSTEM_PROMPT_BASE + GATE_ADDENDUM_OPTIONAL
     return SYSTEM_PROMPT_BASE
@@ -330,40 +323,40 @@ RUNTIME_REMINDER = (
     "harness keeps them for you."
 )
 
-_FIRST_TURN_GUIDE = """This is the opening turn and no actions have been played yet. The attached image shows the \
-current board. For this turn:
-1. Survey the board with python, starting from `current_frame.segmentation`: list the background colours, \
+_FIRST_TURN_GUIDE = """This is the opening turn and no actions have been played yet. The attached \
+image shows the current board. For this turn:
+1. Inspect the board with python, starting from `current_frame.segmentation`: list the background colours, \
 small objects, repeated shapes, and bars or counters along the edges.
 2. Print ASCII only for small windows around objects you want to inspect closely.
-3. Write a first version of every labelled line, from Goal model and World model through Plan, Action \
-model, Open questions, Recent findings and Cross-level notes, marking guesses as guesses.
-4. Choose the single action whose outcome would teach you the most, play it with action(...) at the end \
-of the cell, and say beforehand what you expect it to do.
+3. Write a first world model, using any of the optional prefixes (Goal model, World model, Plan, Action \
+model, Open questions, Recent findings, Cross-level notes) that help.
+4. Choose an action or a short sequence that serves your current goal and play it with action(...) at the end \
+of the cell.
 5. After it runs, the result dict and the refreshed board are available in the same cell, so you can print a \
 short summary of what changed before the cell ends.
 6. Look at the whole board, not only the middle: counters, bars and small markers near the edges often tell \
-you how many moves you have or how close you are to finishing, and they are easy to miss on a first look."""
+you how many moves you have or how close you are to finishing, and they are easy to miss on a first look.\
+ If the image shows what your text summary misses, say so, and look closer."""
 
 _LATER_TURN_GUIDE = """For this turn:
-1. Check what the previous move or moves did: compare `previous_frame` with `current_frame`, and describe the \
-changes as objects moving, appearing, vanishing or changing colour, not as raw cells. A move that changed \
-nothing also tells you something about the rules.
-2. Compare the outcome with what your Plan expected. Where it differs, record that in Recent findings and \
-correct the World model or the Action model.
-3. If the level changed, survey the new board through the segmentation before reusing old assumptions.
-4. If a move had no visible effect, note the label and position so you do not repeat it, and check whether \
-only an edge counter changed.
-5. Rewrite all seven labelled lines in your reply so that the next prompt carries your current picture. \
-Keep each line short; long notes crowd out the board history you need later.
-6. Then act: one informative probe when something is still uncertain, or one list of moves when the sequence \
-is reliable, saying what you expect. Stop after any result with level_completed, game_over, \
-run_complete or done set, and look at the new board before playing anything else. Prefer the \
-moves whose results you can predict."""
+1. Inspect the evidence with code: what the last moves changed, comparing `previous_frame` with \
+`current_frame` and their segmentations, described as objects rather than raw cells.
+2. Refine your working world model from the newest history; if the level changed, survey the new board \
+before reusing old assumptions.
+3. Search or score candidate actions and short sequences against your current goal, using your model \
+wherever it helps.
+4. Act: send a reliable short sequence as one batched call. You may call action(...) more than once in a \
+cell, but stop as soon as a result reports level_completed, game_over, run_complete or done.\
+
+5. Keep the reply focused: the code, the revised world model and the chosen moves matter more than long \
+prose. If a cell fails, fix the cause and run it again rather than repeating it unchanged, and if several \
+moves in a row changed nothing, step back and reconsider the goal before spending more actions on the same \
+idea. Short replies leave more room."""
 
 
 _TURN_REMINDERS = """Reminders:
-- Your score on each level depends on how few actions you use, so every move should either test a clear \
-hypothesis or carry out a plan you already trust.
+- Your score on each level depends on how few actions you use, so spend moves where your world model and \
+your goal say they will help.
 - Inspect cheaply: segmentation summaries, counts and small ASCII windows rather than whole-board prints, and \
 keep each cell's printed output well under about 1,024 tokens.
 - A list passed to action(...) runs in order and halts on its own at a level completion, a win or GAME_OVER; \
@@ -400,16 +393,21 @@ def user_prompt(
                  "GAME_OVER on its own.")
     lines.append(RUNTIME_REMINDER)
     carried = render_notes(notes)
-    if carried:
-        lines.append(NOTES_HEADER + "\n" + carried)
+    if not first_turn:
+        # the revised-world-model mandate sits right before the carried notes, as in the original
+        lines.append(WORLD_MODEL_MANDATE + ("\n" + NOTES_HEADER + "\n" + carried if carried else ""))
     lines.append(_FIRST_TURN_GUIDE if first_turn else _LATER_TURN_GUIDE)
     lines.append(_TURN_REMINDERS)
     return "\n\n".join(lines)
 
 
+WORLD_MODEL_MANDATE = (
+    "IMPORTANT: GIVE YOUR REVISED WORLD MODEL BEFORE YOU EXECUTE ANY NEW ACTION. By default, copy your "
+    "previous world model and adjust it to the new evidence; the labelled prefixes are optional helpers."
+)
 NOTES_HEADER = (
-    "Your labelled notes, carried over from your past replies. Check each line against the current board "
-    "and revise them in this reply:"
+    "Your carried notes from earlier replies, to copy forward and adjust: keep what still holds and fix what the "
+    "newer board contradicts."
 )
 
 
@@ -419,9 +417,9 @@ Please continue like this:
 difference between previous_frame and current_frame instead of printing the whole board.
 2. Bring your labelled notes up to date with what you have learned so far, World model and Plan first, so \
 that the next prompt carries them.
-3. In the same cell or a following one, call action(...) with the move you judge most informative, or with a \
-list of moves if the sequence is already reliable, and say what you expect it to do. One cheap probe \
-beats another reply without a move.
+3. In the same cell or a following one, call action(...) with the move that best serves your goal, or with a \
+list of moves if the sequence is already reliable. Inspecting without acting is fine in one cell, but a turn \
+ends once a move is played.
 Describing a move in prose, or writing code in your reply without calling the tool, plays nothing. Each cell \
 starts fresh with the game state preloaded, so it does not depend on anything you wrote earlier. Keep the \
 printed output of each cell short, well under about 1,024 tokens, so that your context is not used up by \

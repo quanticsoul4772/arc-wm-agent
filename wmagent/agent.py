@@ -569,7 +569,8 @@ class ToolAgent:
         self.prompts_dir = prompts_dir
         self.clock = clock
         self.http = requests.Session()
-        self.system_prompt = prompts.system_prompt(self.gate_mode)
+        self.system_prompt = prompts.system_prompt(
+            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8)
         self._state_path: Path | None = None
         self._new_game()
 

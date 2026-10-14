@@ -692,9 +692,51 @@ def test_system_prompt_addenda_by_mode(tmp_path):
         forced = _agent(server, gate=WorldModelGate(probe_actions=1, max_refusals=8))
         optional = _agent(server, gate=WorldModelGate(probe_actions=1, max_refusals=8, optional=True))
     assert off.system_prompt == prompts.SYSTEM_PROMPT_BASE
-    assert forced.system_prompt.endswith(prompts.GATE_ADDENDUM_FORCED)
+    assert forced.system_prompt.endswith(prompts.gate_addendum_forced(1))
     assert optional.system_prompt.endswith(prompts.GATE_ADDENDUM_OPTIONAL)
     assert "simulate(" in optional.system_prompt and "simulate(" not in forced.system_prompt
+
+
+def test_gate_section_states_interface_and_rules_only():
+    """S1 acceptance gap (report 76243eb): the gate section is last, about 1.2K chars, has no code and no
+    construction strategy, states the per-level allowance, the purpose of probes, continued prediction and
+    planning over predicted boards, and leaves out the scorer's fine print."""
+    section = prompts.gate_addendum_forced(8)
+    system = prompts.system_prompt("forced", 8)
+    assert system.endswith(section) and 1100 <= len(section) <= 1350
+    assert "```" not in section and "def predict" not in section and "splitlines" not in section
+    for fact in ("8 real actions", "learning what each action does", "keeps", "predicting the new moves",
+                 "breadth-first over predicted boards", "classes", "75%", "a few cells", "placeholder",
+                 "current_frame.ascii", "`.action` of a transition"):
+        assert fact in section, fact
+    for absent in ("at least 3", "couple of cells", "one or two", "sure of", "unchanged for everything"):
+        assert absent not in section, absent
+    assert "12 real actions" in prompts.system_prompt("forced", 12)
+    for absent in ("Running experiments", "one move per cell", "Change one thing at a time",
+                   "confirmed prediction", "decide what you"):
+        assert absent not in system, absent
+    assert "score candidate actions and short sequences" in system
+
+
+def test_world_model_mandate_precedes_the_carried_notes():
+    """Item 5: an emphasised copy-and-adjust instruction sits right before the notes on later turns."""
+    summary = {"executed_count": 1, "executed_actions": ["UP"], "level": 1}
+    later = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP"], notes={"plan": "p"},
+                                previous_summary=summary)
+    block = later.split("\n\n")[3]
+    assert block.startswith(prompts.WORLD_MODEL_MANDATE) and block.endswith("- Plan: p")
+    assert prompts.WORLD_MODEL_MANDATE.split(":")[0] == "IMPORTANT" and "BEFORE" in prompts.WORLD_MODEL_MANDATE
+    assert "optional" in prompts.WORLD_MODEL_MANDATE
+    no_notes = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP"], notes={},
+                                   previous_summary=summary)
+    assert prompts.WORLD_MODEL_MANDATE in no_notes and prompts.NOTES_HEADER not in no_notes
+    first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=["UP"], notes={},
+                                previous_summary=None)
+    assert prompts.WORLD_MODEL_MANDATE not in first
+    for text in (later, first):
+        for absent in ("Plan expected", "saying what you expect", "results you can predict", "informative probe"):
+            assert absent not in text, absent
+    assert "more than once in a" in later and "batched call" in later
 
 
 def test_gate_from_env(monkeypatch):
