@@ -30,7 +30,7 @@ SERVED_MODEL = "vrfai/Qwen3.6-27B-FP8"
 HOST = "127.0.0.1"
 PORT = 1234
 HEALTH_POLL_S = 5.0
-HEALTH_TIMEOUT_S = 900.0
+HEALTH_TIMEOUT_S = 2400.0  # Kaggle input reads of the 27B snapshot exceeded 900 s (wm-run-paper-check v1, 2026-10-24)
 KILL_GRACE_S = 30.0
 EXPECTED_GPU = "rtx pro 6000"
 
