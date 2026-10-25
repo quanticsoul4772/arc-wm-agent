@@ -5,8 +5,8 @@ runpy, so it must not import the wmagent package. `start()` returns a handle;
 `teardown(handle)` stops the server process group and removes the installed
 site-packages.
 
-Sequence (spec 2.6 step 4): GPU check, wheelhouse install (reused when the
-stamp matches), server launch, /v1/models health poll, one smoke chat, and the
+Sequence (spec 2.6 step 4): GPU check, model copy to local disk, wheelhouse
+install (reused when the stamp matches), server launch, /v1/models health poll, one smoke chat, and the
 analyzer env exported into os.environ.
 """
 from __future__ import annotations
@@ -30,7 +30,12 @@ SERVED_MODEL = "vrfai/Qwen3.6-27B-FP8"
 HOST = "127.0.0.1"
 PORT = 1234
 HEALTH_POLL_S = 5.0
-HEALTH_TIMEOUT_S = 2400.0  # Kaggle input reads of the 27B snapshot exceeded 900 s (wm-run-paper-check v1, 2026-10-24)
+HEALTH_TIMEOUT_S = 2400.0
+# vLLM's load of the 35.9 GB snapshot straight from the gcsfuse input mount did not finish in 2,400 s
+# (wm-run-paper-check v1/v2), while one sequential read ran at 45 MB/s (wm-model-read-test, 2026-10-24).
+STAGE_DIR = Path("/tmp/wmagent-model")
+COPY_CHUNK = 64 << 20
+COPY_REPORT = 4 << 30
 KILL_GRACE_S = 30.0
 EXPECTED_GPU = "rtx pro 6000"
 
@@ -71,6 +76,32 @@ def install_wheelhouse(wheelhouse: Path, target: Path) -> bool:
     subprocess.run(cmd, check=True)
     stamp.write_text(STAMP + "\n")
     return True
+
+
+def stage_model(model_dir: Path, dest: Path = STAGE_DIR) -> Path:
+    """Copy the model directory to local disk with sequential reads; returns `dest`."""
+    files = sorted(f for f in model_dir.rglob("*") if f.is_file())
+    need = sum(f.stat().st_size for f in files)
+    dest.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(dest).free
+    if free < need:
+        raise RuntimeError(f"{dest} has {free / 1e9:.1f} GB free, the model needs {need / 1e9:.1f} GB")
+    t0 = time.monotonic()
+    done, mark = 0, COPY_REPORT
+    for f in files:
+        out = dest / f.relative_to(model_dir)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(f, "rb", buffering=0) as src, open(out, "wb") as dst:
+            while chunk := src.read(COPY_CHUNK):
+                dst.write(chunk)
+                done += len(chunk)
+                if done >= mark:
+                    dt = time.monotonic() - t0
+                    print(f"[setup_vllm] model copy {done / 1e9:.1f}/{need / 1e9:.1f} GB in {dt:.0f}s "
+                          f"({done / dt / 1e6:.0f} MB/s)", flush=True)
+                    mark += COPY_REPORT
+    print(f"[setup_vllm] model copied to {dest}: {need / 1e9:.1f} GB in {time.monotonic() - t0:.0f}s", flush=True)
+    return dest
 
 
 def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[str]:
@@ -217,6 +248,7 @@ def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, age
             print(f"[setup_vllm] GPU: {check_gpu()}", flush=True)
         if model_dir is None or wheelhouse is None:
             raise ValueError("model_dir and wheelhouse are required to launch vLLM")
+        model_dir = stage_model(model_dir)
         site_packages = working / "vllm-site-packages"
         site_packages.mkdir(parents=True, exist_ok=True)
         fresh = install_wheelhouse(wheelhouse, site_packages)

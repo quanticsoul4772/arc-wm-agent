@@ -201,6 +201,26 @@ def test_vllm_command_flags(tmp_path):
     assert env["USE_TF"] == "0" and env["VLLM_NO_USAGE_STATS"] == "1" and env["TRANSFORMERS_NO_TORCHVISION"] == "1"
 
 
+def test_stage_model_copies_tree(tmp_path, monkeypatch):
+    src = tmp_path / "model"
+    (src / "sub").mkdir(parents=True)
+    (src / "model.safetensors").write_bytes(os.urandom(3 << 20))
+    (src / "sub" / "config.json").write_text("{}")
+    monkeypatch.setattr(setup_vllm, "COPY_CHUNK", 1 << 20)
+    dest = setup_vllm.stage_model(src, tmp_path / "local")
+    assert (dest / "model.safetensors").read_bytes() == (src / "model.safetensors").read_bytes()
+    assert (dest / "sub" / "config.json").read_text() == "{}"
+
+
+def test_stage_model_refuses_when_disk_too_small(tmp_path, monkeypatch):
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "model.safetensors").write_bytes(b"x" * 1024)
+    monkeypatch.setattr(setup_vllm.shutil, "disk_usage", lambda p: type("U", (), {"free": 10})())
+    with pytest.raises(RuntimeError, match="GB free"):
+        setup_vllm.stage_model(src, tmp_path / "local")
+
+
 def test_gpu_check(monkeypatch):
     def fake(out):
         return lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")
