@@ -1,6 +1,6 @@
 """Game session: the turn loop around one started game, and the `step_env` callback.
 
-Spec: track2-rewrite-spec-2026-10-13.md, section 2.3 (behaviour) and 2.7 (equivalence checklist).
+Spec: track2-rewrite-spec-2026-10-13.md, section 2.3 (behavior) and 2.7 (equivalence checklist).
 
 The session sits between three other modules:
 - the started game from the engine adapter (T1), used through the `SessionGame` protocol below;

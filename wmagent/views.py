@@ -6,7 +6,7 @@ A state snapshot is a plain dict:
      "valid_actions": [str, ...], "last_action_result": dict}
 
 where each frame is `{"grid": [[int]], "ascii": str?, "step": int, "level": int, "shape": [r, c]?}`.
-`ascii` wins when present; otherwise it is rendered from `grid` with the colour
+`ascii` wins when present; otherwise it is rendered from `grid` with the color
 alphabet. `RuntimeState` turns a snapshot into the globals the model's code sees
 (`current_frame`, `history`, `transitions`, ...) and refreshes them in place
 after each `action()` call. Only the standard library is used.
@@ -18,8 +18,8 @@ from typing import Any
 
 from wmagent.segmentation import ASCII_ALPHABET, segment, to_char_rows
 
-# The colour alphabet is module state (set by install_runtime), not per-view state, so that
-# dir() of a frame shows exactly the original's attribute set (behaviour note F15).
+# The color alphabet is module state (set by install_runtime), not per-view state, so that
+# dir() of a frame shows exactly the original's attribute set (behavior note F15).
 _color_chars = ASCII_ALPHABET
 
 

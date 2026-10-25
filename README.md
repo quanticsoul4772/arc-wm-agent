@@ -2,7 +2,7 @@
 
 Clean-room implementation of the ARC-AGI-3 agent harness used by the paper's method: a coding agent in a Python sandbox, with an enforced executable world model (`wmagent/world_model_gate.py`) and held-out confirmation.
 
-Built by agents from the behavioural spec in `D:\Projects\arc\claudedocs\track2-rewrite-spec-2026-10-13.md`. Builders do not read the Tufa Labs source. Only the verifier compares behaviour against it.
+Built by agents from the behavioral spec in `D:\Projects\arc\claudedocs\track2-rewrite-spec-2026-10-13.md`. Builders do not read the Tufa Labs source. Only the verifier compares behavior against it.
 
 Layout (each module is owned by one build task):
 - `wmagent/engine.py`, `wmagent/runner.py`: T1, engine adapter and runner (spec 2.1, 2.2).

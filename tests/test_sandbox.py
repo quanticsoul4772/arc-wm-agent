@@ -33,7 +33,7 @@ def test_stdout_and_result():
     assert out == {"stdout": "hi\n", "result": {"a": [1, 2], "b": "wW\nWW"}, "action_results": []}
 
 
-def test_result_defaults_to_none_and_serialisation_follows_the_original():
+def test_result_defaults_to_none_and_serialization_follows_the_original():
     """F14: sets become lists, inf/nan pass through, other objects use str()."""
     assert _run("x = 1")["result"] is None
     assert _run("result = {1}")["result"] == [1]
@@ -166,7 +166,7 @@ def test_other_imports_are_blocked(module):
 
 def test_import_block_message_has_the_original_length():
     """Round 8: the message names only the module (no allowed-module list), 130 chars shorter than before,
-    which matches the original's serialised length; tool results count toward eviction."""
+    which matches the original's serialized length; tool results count toward eviction."""
     last = _run("import os")["error"].splitlines()[-1]
     assert last == "ImportError: Import of 'os' is blocked in this sandbox."
     assert len(json.dumps(last)) - 2 == 55
@@ -244,7 +244,7 @@ def _stepper(log: list):
     return handler
 
 
-def test_action_forms_are_normalised_and_state_refreshes():
+def test_action_forms_are_normalized_and_state_refreshes():
     log: list = []
     code = (
         "r1 = action('UP')\n"

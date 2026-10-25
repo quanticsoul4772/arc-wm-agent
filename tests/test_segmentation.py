@@ -20,7 +20,7 @@ def test_regions_are_four_connected_and_in_reading_order():
     ]
 
 
-def test_hash_ignores_position_and_depends_on_colour_and_shape():
+def test_hash_ignores_position_and_depends_on_color_and_shape():
     a = _seg("BBBB\nBRRB\nBBBB")["nodes"][1]
     b = _seg("BBBB\nBBRR\nBBBB")["nodes"][1]
     c = _seg("BBBB\nBYYB\nBBBB")["nodes"][1]
@@ -77,12 +77,12 @@ def test_children_are_directly_enclosed_regions():
         WWWWWWWWW
         """
     )
-    by_colour = {n["color"]: n for n in seg["nodes"]}
-    assert by_colour["W"]["children"] == [by_colour["B"]["id"]]
-    assert by_colour["B"]["children"] == [by_colour["R"]["id"]]
-    assert by_colour["R"]["children"] == [by_colour["G"]["id"]]
-    assert by_colour["G"]["children"] == [by_colour["Y"]["id"]]
-    assert by_colour["Y"]["children"] == []
+    by_color = {n["color"]: n for n in seg["nodes"]}
+    assert by_color["W"]["children"] == [by_color["B"]["id"]]
+    assert by_color["B"]["children"] == [by_color["R"]["id"]]
+    assert by_color["R"]["children"] == [by_color["G"]["id"]]
+    assert by_color["G"]["children"] == [by_color["Y"]["id"]]
+    assert by_color["Y"]["children"] == []
 
 
 def test_open_shape_encloses_nothing_and_border_cells_are_never_enclosed():

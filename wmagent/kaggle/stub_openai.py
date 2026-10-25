@@ -2,7 +2,7 @@
 
 Serves GET /v1/models and POST /v1/chat/completions. Every chat reply carries
 reasoning, a world-model note and one `python` tool call that takes the first
-valid non-MOUSE action (MOUSE at the centre when that is the only option), so an
+valid non-MOUSE action (MOUSE at the center when that is the only option), so an
 agent driven by it plays legal actions. The smoke chat (no tools) gets "OK".
 
     python -m wmagent.kaggle.stub_openai --host 127.0.0.1 --port 1234

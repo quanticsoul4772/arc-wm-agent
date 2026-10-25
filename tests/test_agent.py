@@ -171,7 +171,7 @@ def _roles(messages):
     return [m["role"] for m in messages]
 
 
-# --------------------------------------------------------------------------- (a) mock-server behaviour
+# --------------------------------------------------------------------------- (a) mock-server behavior
 
 
 def test_structured_tool_call_executes_action_and_persists(tmp_path):
@@ -617,12 +617,12 @@ def test_history_is_evicted_by_images_across_turns(tmp_path):
 
 def test_extract_notes_labels_bullets_continuations():
     text = (
-        "Some intro.\n- **World model:** red block moves with arrows\n  walls are grey\n\n"
+        "Some intro.\n- **World model:** red block moves with arrows\n  walls are gray\n\n"
         "goal model: reach the yellow cell\n* Plan: UP x3\n1. Cross-level notes: timer bar on top\nunrelated"
     )
     notes = extract_notes(text)
     # bullets (- and *) are removed, so the closing ** stays in the value; numbered lines are not labels
-    assert notes["world"] == "** red block moves with arrows walls are grey"
+    assert notes["world"] == "** red block moves with arrows walls are gray"
     assert notes["goal"] == "reach the yellow cell"
     assert notes["plan"] == "UP x3 1. Cross-level notes: timer bar on top unrelated"
     assert "cross_level" not in notes
@@ -632,17 +632,17 @@ def test_extract_notes_original_rules():
     """F17: blank lines do not end a label, repeated labels append, markup or a space before the colon
     does not match, and the fallback labels fill only empty primaries."""
     text = (
-        "World model: walls are grey\n\n  still the world\n**Goal model**: no match\nPlan : no match\n"
+        "World model: walls are gray\n\n  still the world\n**Goal model**: no match\nPlan : no match\n"
         "World model (updated): no match\nWorld model: second part\n-*- Open questions:   what\tis\n  red?\n"
         "Hypothesis: ignored because World model exists\nHistory check: fills findings\nNext test: fills plan"
     )
     notes = extract_notes(text)
-    assert notes["world"] == ("walls are grey still the world **Goal model**: no match Plan : no match "
+    assert notes["world"] == ("walls are gray still the world **Goal model**: no match Plan : no match "
                               "World model (updated): no match second part")
     assert notes["questions"] == "what is red?"
     assert notes["findings"] == "fills findings" and notes["plan"] == "fills plan"
     assert extract_notes("Plan:\n\nHypothesis: h") == {"world": "h"}
-    assert extract_notes("intro only\nnothing labelled") == {}
+    assert extract_notes("intro only\nnothing labeled") == {}
 
 
 def test_continuation_lines_keep_their_bullets():
@@ -719,7 +719,7 @@ def test_gate_section_states_interface_and_rules_only():
 
 
 def test_system_prompt_parity_items_round_11():
-    """Parity review (report 83d1820): generic scorer/search guidance with an emphasised search instruction,
+    """Parity review (report 83d1820): generic scorer/search guidance with an emphasized search instruction,
     no concrete simulation hint or data-structure tips, the restored probing/search facts, an uppercase
     edge-bar warning, and no notes-memory facts."""
     system = prompts.system_prompt("forced", 8)
@@ -741,7 +741,7 @@ def test_system_prompt_parity_items_round_11():
 
 
 def test_world_model_mandate_precedes_the_carried_notes():
-    """Item 5: an emphasised copy-and-adjust instruction sits right before the notes on later turns."""
+    """Item 5: an emphasized copy-and-adjust instruction sits right before the notes on later turns."""
     summary = {"executed_count": 1, "executed_actions": ["UP"], "level": 1}
     later = prompts.user_prompt(step=3, level=1, max_level_seen=1, valid_actions=["UP"], notes={"plan": "p"},
                                 previous_summary=summary)
@@ -927,7 +927,7 @@ def test_truncation_marks_the_payload_once():
     assert out["stdout"].endswith("[truncated 144 chars]")
     assert list(out)[-2:] == ["truncated", "truncation_note"] and out["truncated"] is True
     assert "64 tokens" in out["truncation_note"]
-    # same serialised length as the original's note (report round 7: it counts toward eviction)
+    # same serialized length as the original's note (report round 7: it counts toward eviction)
     note = json.loads(agent_mod.format_tool_result({"stdout": "s" * 5000}, [], 4096, 1024))["truncation_note"]
     assert len(json.dumps(note)) - 2 == 71
     short = json.loads(agent_mod.format_tool_result({"stdout": "ok"}, [], 256, 64))
@@ -935,7 +935,7 @@ def test_truncation_marks_the_payload_once():
     assert agent_mod.tool_output_limit(1024) == 4096 and agent_mod.tool_output_limit(10) == 256
 
 
-# --------------------------------------------------------------------------- smaller original behaviours (F20)
+# --------------------------------------------------------------------------- smaller original behaviors (F20)
 
 
 def test_yield_seconds_zero_disables_the_turn_budget(tmp_path):
@@ -972,13 +972,13 @@ def test_code_is_rstripped_and_assistant_messages_keep_server_arguments(tmp_path
 
 # Sizes measured on the original harness by the equivalence verifier (report F4); eviction depends on them.
 ORIGINAL_SYSTEM_CHARS = 13_913  # as measured in D2 (report round 3)
-# The estimator measures ensure_ascii JSON, so eviction depends on serialised sizes (report round 4).
-ORIGINAL_SYSTEM_MESSAGE_SERIALISED = 14_065
+# The estimator measures ensure_ascii JSON, so eviction depends on serialized sizes (report round 4).
+ORIGINAL_SYSTEM_MESSAGE_SERIALIZED = 14_065
 ORIGINAL_FIRST_USER_CHARS = 2_768  # round-2 averages from the D2 replays (report F4b)
 ORIGINAL_LATER_USER_CHARS = 3_104
 ORIGINAL_CORRECTIVE_CHARS = 1_247
 ORIGINAL_TOOLS_CHARS = 1_144
-# Rewrite serialised sizes after round-9 tuning, paired deltas exactly 0 (a MOUSE game): first turn, later turn without notes, a one-line notes
+# Rewrite serialized sizes after round-9 tuning, paired deltas exactly 0 (a MOUSE game): first turn, later turn without notes, a one-line notes
 # block, corrective. The D2 per-template means they produce are within +/-5 chars of the original's.
 PINNED_TEMPLATE_SIZES = [2819, 2919, 145, 1249]
 
@@ -990,8 +990,8 @@ def _near(value, target, tolerance=0.10):
 def test_prompt_sizes_are_close_to_the_original():
     assert abs(len(prompts.system_prompt("forced")) - ORIGINAL_SYSTEM_CHARS) <= 30
     system_message = {"role": "system", "content": prompts.system_prompt("forced")}
-    serialised = len(json.dumps(system_message, sort_keys=True, ensure_ascii=True))
-    assert serialised == ORIGINAL_SYSTEM_MESSAGE_SERIALISED  # exact (report round 9)
+    serialized = len(json.dumps(system_message, sort_keys=True, ensure_ascii=True))
+    assert serialized == ORIGINAL_SYSTEM_MESSAGE_SERIALIZED  # exact (report round 9)
     assert len(json.dumps(agent_mod.TOOLS, sort_keys=True, ensure_ascii=True)) == ORIGINAL_TOOLS_CHARS
     labels = ["UP", "DOWN", "LEFT", "RIGHT", "SPACE", "MOUSE"]
     first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=labels, notes={},
@@ -1010,7 +1010,7 @@ def _words(text):
     return " ".join("".join(ch if ch.isalnum() else " " for ch in text.lower()).split())
 
 
-def _serialised(text):
+def _serialized(text):
     return len(json.dumps(text, ensure_ascii=True))
 
 
@@ -1081,7 +1081,7 @@ def test_notes_survive_a_level_number_change_without_level_completed(tmp_path):
 
 
 def test_template_sizes_are_pinned():
-    """Serialised sizes tuned to the original's per-template means (report rounds 5-6, within +/-5 chars on the
+    """Serialized sizes tuned to the original's per-template means (report rounds 5-6, within +/-5 chars on the
     D2 replays); a wording change must re-measure against the original before this pin is updated."""
     summary = {"executed_count": 2, "executed_actions": ["UP", "DOWN"], "level": 2}
     first = prompts.user_prompt(step=1, level=1, max_level_seen=1, valid_actions=LABELS, notes={},
@@ -1090,8 +1090,8 @@ def test_template_sizes_are_pinned():
                                 previous_summary=summary)
     with_notes = prompts.user_prompt(step=16, level=2, max_level_seen=2, valid_actions=LABELS,
                                      notes={"plan": "p"}, previous_summary=summary)
-    sizes = [_serialised(first), _serialised(later), _serialised(with_notes) - _serialised(later),
-             _serialised(prompts.corrective_prompt(False))]
+    sizes = [_serialized(first), _serialized(later), _serialized(with_notes) - _serialized(later),
+             _serialized(prompts.corrective_prompt(False))]
     assert sizes == PINNED_TEMPLATE_SIZES
 
 

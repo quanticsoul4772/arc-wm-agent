@@ -1,16 +1,16 @@
-"""Object segmentation of a colour grid.
+"""Object segmentation of a color grid.
 
-`segment(rows)` splits a grid into 4-connected regions of equal colour and
+`segment(rows)` splits a grid into 4-connected regions of equal color and
 describes each one for the model:
 
 - `id`: position in reading order of the region's first (top-most, then
   left-most) cell;
-- `color`: the colour character;
-- `hash`: a position-independent signature of colour plus shape (the region's
+- `color`: the color character;
+- `hash`: a position-independent signature of color plus shape (the region's
   cells shifted so its bounding box starts at (0, 0));
 - `pixels`: cell count;
 - `boundary`: the clockwise outer contour, traced cell to cell with
-  8-neighbour moves from the first cell and reduced to the points where the
+  8-neighbor moves from the first cell and reduced to the points where the
   direction of travel changes, as `[row, col]` pairs;
 - `children`: ids of the regions this one directly encloses (a region is
   enclosed by another when it cannot reach the grid edge without crossing it;
@@ -34,7 +34,7 @@ _STEPS4 = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
 def cell_char(value: Any, color_chars: str = ASCII_ALPHABET) -> str:
-    """Colour character for a grid value; strings are taken as already rendered."""
+    """Color character for a grid value; strings are taken as already rendered."""
     if isinstance(value, str):
         return value
     index = int(value)
@@ -43,7 +43,7 @@ def cell_char(value: Any, color_chars: str = ASCII_ALPHABET) -> str:
 
 
 def to_char_rows(rows: Sequence[Sequence[Any]] | str, color_chars: str = ASCII_ALPHABET) -> list[str]:
-    """Normalise a numeric grid, a list of row strings, or an ascii board to row strings."""
+    """Normalize a numeric grid, a list of row strings, or an ascii board to row strings."""
     if isinstance(rows, str):
         return rows.split("\n") if rows else []
     return ["".join(cell_char(v, color_chars) for v in row) for row in rows]
@@ -52,8 +52,8 @@ def to_char_rows(rows: Sequence[Sequence[Any]] | str, color_chars: str = ASCII_A
 def shape_hash(color: str, cells: list[tuple[int, int]]) -> str:
     top = min(r for r, _ in cells)
     left = min(c for _, c in cells)
-    normalised = sorted((r - top, c - left) for r, c in cells)
-    return hashlib.sha1(repr((color, normalised)).encode()).hexdigest()[:16]
+    normalized = sorted((r - top, c - left) for r, c in cells)
+    return hashlib.sha1(repr((color, normalized)).encode()).hexdigest()[:16]
 
 
 def _label(grid: list[str]) -> tuple[list[list[int]], list[list[tuple[int, int]]]]:
@@ -65,7 +65,7 @@ def _label(grid: list[str]) -> tuple[list[list[int]], list[list[tuple[int, int]]
             if labels[r][c] != -1:
                 continue
             ident = len(regions)
-            colour = grid[r][c]
+            color = grid[r][c]
             labels[r][c] = ident
             cells = []
             queue = deque([(r, c)])
@@ -74,7 +74,7 @@ def _label(grid: list[str]) -> tuple[list[list[int]], list[list[tuple[int, int]]
                 cells.append((cr, cc))
                 for dr, dc in _STEPS4:
                     nr, nc = cr + dr, cc + dc
-                    if 0 <= nr < height and 0 <= nc < len(grid[nr]) and labels[nr][nc] == -1 and grid[nr][nc] == colour:
+                    if 0 <= nr < height and 0 <= nc < len(grid[nr]) and labels[nr][nc] == -1 and grid[nr][nc] == color:
                         labels[nr][nc] = ident
                         queue.append((nr, nc))
             cells.sort()
@@ -83,7 +83,7 @@ def _label(grid: list[str]) -> tuple[list[list[int]], list[list[tuple[int, int]]
 
 
 def _trace(cells: list[tuple[int, int]], member: set[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Moore-neighbour contour walk, clockwise from the first cell in reading order."""
+    """Moore-neighbor contour walk, clockwise from the first cell in reading order."""
     start = cells[0]
     if len(cells) == 1:
         return [start]
@@ -134,7 +134,7 @@ def _corners(path: list[tuple[int, int]]) -> list[list[int]]:
 
 def _holes(cells: list[tuple[int, int]], member: set[tuple[int, int]]) -> set[tuple[int, int]]:
     """Cells inside the region's bounding box that cannot reach the outside
-    through 4-neighbour moves without crossing the region."""
+    through 4-neighbor moves without crossing the region."""
     top = min(r for r, _ in cells) - 1
     bottom = max(r for r, _ in cells) + 1
     left = min(c for _, c in cells) - 1
@@ -201,12 +201,12 @@ def segment(rows: Sequence[Sequence[Any]] | str, color_chars: str = ASCII_ALPHAB
 
     nodes = []
     for ident, cells in enumerate(regions):
-        colour = grid[cells[0][0]][cells[0][1]]
+        color = grid[cells[0][0]][cells[0][1]]
         nodes.append(
             {
                 "id": ident,
-                "color": colour,
-                "hash": shape_hash(colour, cells),
+                "color": color,
+                "hash": shape_hash(color, cells),
                 "pixels": len(cells),
                 "boundary": _corners(_trace(cells, members[ident])),
                 "children": sorted(children[ident]),

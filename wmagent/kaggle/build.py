@@ -202,7 +202,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
-    ap.add_argument("--license", default="unknown", help="Kaggle dataset licence name")
+    ap.add_argument("--license", default="unknown", help="Kaggle dataset license name")
     ap.add_argument("--public", action="store_true", help="make the kernel public (default private)")
     ap.add_argument("--dry-run", action="store_true", help="only write files")
     a = ap.parse_args(argv)

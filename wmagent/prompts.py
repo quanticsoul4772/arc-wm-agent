@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# ASCII character -> palette index and colour name (index order = palette order).
+# ASCII character -> palette index and color name (index order = palette order).
 COLOR_LEGEND: list[tuple[int, str, str]] = [
     (0, "W", "white"),
     (1, "w", "light grey"),

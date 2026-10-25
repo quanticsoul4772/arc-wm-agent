@@ -44,7 +44,7 @@ ALLOWED_MODULES = frozenset(
     }
 )
 
-# The original's whitelist, exactly 53 names (behaviour note F12), plus the guarded __import__. No class
+# The original's whitelist, exactly 53 names (behavior note F12), plus the guarded __import__. No class
 # machinery and only four exception names; NotImplemented and Ellipsis are not names either.
 SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr", "complex", "dict",
@@ -91,7 +91,7 @@ def _timeout_label(timeout_seconds: float) -> str:
 
 
 class _LineChannel:
-    """Reads newline-terminated messages from a pipe fd, honouring a deadline."""
+    """Reads newline-terminated messages from a pipe fd, honoring a deadline."""
 
     def __init__(self, fd: int) -> None:
         import selectors
@@ -143,7 +143,7 @@ def run_sandboxed_python(
 ) -> dict[str, Any]:
     """Run `code` in a fresh sandbox process.
 
-    `action_handler(actions)` receives the normalised action list for each
+    `action_handler(actions)` receives the normalized action list for each
     `action()` call and returns `{"action_result": dict, "state": snapshot}`;
     raising `ActionRefused` (or any exception) rejects the call.
 

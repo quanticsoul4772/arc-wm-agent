@@ -100,7 +100,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
 
 
 def resolve_endpoint(model: str, env: Any) -> tuple[str, str]:
-    """Base URL and provider (behaviour note F20). A local preset model id reads the LOCAL_ANALYZER_*
+    """Base URL and provider (behavior note F20). A local preset model id reads the LOCAL_ANALYZER_*
     variables; any other id prefers OPENAI_BASE_URL whenever it exists (even if empty) and OPENAI_PROVIDER."""
     if model.strip().lower() in LOCAL_MODEL_PRESETS:
         # set-but-empty is taken as is (and rejected at construction), as in the original
@@ -179,7 +179,7 @@ CONTEXT_ERROR_MARKERS = (
     '"param":"input_tokens"',
 )
 
-# compact_result key rules (equivalence report, behaviour note F11), in emission order.
+# compact_result key rules (equivalence report, behavior note F11), in emission order.
 COMPACT_COPIED_KEYS = ("action_num", "level", "score", "reward", "state")
 COMPACT_FLAG_KEYS = ("board_changed", "done", "level_completed", "game_over", "run_complete")
 COMPACT_BASE_KEYS = ("executed", *COMPACT_COPIED_KEYS, "valid_actions", *COMPACT_FLAG_KEYS, "action_display")
@@ -218,7 +218,7 @@ def clean_text(text: Any) -> str:
 
 
 MARKUP_DETECT = re.compile(r"<tool_call|<function=", re.IGNORECASE)
-# Only complete blocks are recovered and stripped (behaviour note F9); incomplete markup stays in the text.
+# Only complete blocks are recovered and stripped (behavior note F9); incomplete markup stays in the text.
 _COMPLETE_CALL = re.compile(
     r"<tool_call>\s*<function=([^>]*)>(.*?)</function>\s*</tool_call>", re.DOTALL | re.IGNORECASE
 )
@@ -258,7 +258,7 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-# Label text -> note key, primaries first, then the fallbacks (behaviour note F17).
+# Label text -> note key, primaries first, then the fallbacks (behavior note F17).
 _PRIMARY_LABELS = [(label, key) for key, label in prompts.NOTE_LABELS]
 _FALLBACK_LABELS = [("Hypothesis", "world"), ("History check", "findings"), ("Next test", "plan")]
 
@@ -271,7 +271,7 @@ def _strip_bullets(line: str) -> str:
 
 
 def extract_notes(text: str) -> dict[str, str]:
-    """Labelled notes from assistant content. A label line starts (after `-`/`*` bullets) with the label
+    """Labeled notes from assistant content. A label line starts (after `-`/`*` bullets) with the label
     immediately followed by `:`; other non-blank lines continue the current label as written (trimmed only),
     blank lines are skipped,
     a repeated label appends, and each note is collapsed to one line. A fallback label fills its key only
@@ -422,7 +422,7 @@ def to_label(name: str) -> str:
 
 
 def compact_result(payload: dict[str, Any]) -> dict[str, Any]:
-    """The step_env payload reduced to what the model sees (behaviour note F11)."""
+    """The step_env payload reduced to what the model sees (behavior note F11)."""
     display = payload.get("action_display") or payload.get("action_name") or None
     compact: dict[str, Any] = {"executed": bool(payload.get("executed"))}
     compact.update({key: payload.get(key) for key in COMPACT_COPIED_KEYS})
@@ -450,7 +450,7 @@ def compact_result(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def latch_stub(latched: dict[str, Any], reason: str, requested: int) -> dict[str, Any]:
-    """What a later action() in the same cell returns after a terminal result (behaviour note F19)."""
+    """What a later action() in the same cell returns after a terminal result (behavior note F19)."""
     details = {
         "run_complete": "The game is already won; nothing more is played.",
         "game_over": "An earlier action() in this cell ended in GAME_OVER; the level restarts before your next turn.",
@@ -493,7 +493,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 class _Truncator:
-    """Cuts fields to the limit and remembers whether any was cut (behaviour note F16)."""
+    """Cuts fields to the limit and remembers whether any was cut (behavior note F16)."""
 
     def __init__(self, limit: int) -> None:
         self.limit = limit

@@ -1,7 +1,7 @@
 """The Kaggle notebook (`run.ipynb`), as plain-Python cells.
 
 Cells use no IPython magics, so the notebook also runs as a script (the local
-end-to-end test concatenates the code cells). Behaviour follows spec 2.6:
+end-to-end test concatenates the code cells). Behavior follows spec 2.6:
 
 1. start time, submission flag, LIBRARY_PATH, ONLY_RESET_LEVELS;
 2. locate inputs by search (bundle by marker file; competition, wheelhouse, model);
