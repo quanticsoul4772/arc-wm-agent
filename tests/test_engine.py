@@ -162,6 +162,93 @@ def test_competition_scorecard_refcount_and_single_make():
     assert arcade.closed == ["card-0"]
 
 
+class FlakyCloseArcade(FakeArcade):
+    """close_scorecard raises for the first `failures` calls."""
+
+    def __init__(self, game_ids, failures):
+        super().__init__(game_ids)
+        self.failures = failures
+        self.close_calls = 0
+
+    def close_scorecard(self, card_id):
+        self.close_calls += 1
+        if self.close_calls <= self.failures:
+            raise ConnectionError("gateway timeout")
+        super().close_scorecard(card_id)
+
+
+def test_scorecard_close_is_retried_until_it_succeeds(monkeypatch):
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+    arcade = FlakyCloseArcade(["a-1"], failures=2)
+    engine = Engine(COMPETITION, arcade=arcade)
+    game = engine.new_game("a-1")
+    game.start()
+    game.finish()
+    assert arcade.close_calls == 3 and arcade.closed == ["card-0"] and engine.scorecard.closed
+
+
+def test_scorecard_close_failure_raises_and_a_later_close_retries(monkeypatch, capsys):
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+    arcade = FlakyCloseArcade(["a-1"], failures=5)
+    engine = Engine(COMPETITION, arcade=arcade)
+    game = engine.new_game("a-1")
+    game.start()
+    with pytest.raises(ConnectionError):
+        game.finish()
+    assert arcade.close_calls == 5 and arcade.closed == [] and not engine.scorecard.closed
+    assert "[finished] a-1" in capsys.readouterr().out  # the finished line is printed before the close
+    engine.scorecard.close()  # the teardown safety net
+    assert arcade.close_calls == 6 and arcade.closed == ["card-0"] and engine.scorecard.closed
+
+
+class HTTP404(Exception):
+    """Shaped like requests.HTTPError from raise_for_status() on a 404 reply."""
+
+    def __init__(self):
+        super().__init__("404 Client Error: NOT FOUND")
+        self.response = type("Response", (), {"status_code": 404})()
+
+
+class LostReplyArcade(FakeArcade):
+    """The first close reaches the server but its reply is lost; the server then answers 404."""
+
+    def __init__(self, game_ids):
+        super().__init__(game_ids)
+        self.close_calls = 0
+
+    def close_scorecard(self, card_id):
+        self.close_calls += 1
+        if self.close_calls == 1:
+            super().close_scorecard(card_id)
+            raise TimeoutError("read timed out")
+        raise HTTP404()
+
+
+def test_scorecard_close_404_after_a_lost_reply_counts_as_closed(monkeypatch):
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+    arcade = LostReplyArcade(["a-1"])
+    engine = Engine(COMPETITION, arcade=arcade)
+    game = engine.new_game("a-1")
+    game.start()
+    game.finish()
+    assert arcade.close_calls == 2 and arcade.closed == ["card-0"] and engine.scorecard.closed
+
+
+def test_scorecard_close_404_on_the_first_attempt_is_an_error(monkeypatch):
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+
+    class Unknown(FakeArcade):
+        def close_scorecard(self, card_id):
+            raise HTTP404()
+
+    engine = Engine(COMPETITION, arcade=Unknown(["a-1"]))
+    game = engine.new_game("a-1")
+    game.start()
+    with pytest.raises(HTTP404):
+        game.finish()
+    assert not engine.scorecard.closed
+
+
 # ------------------------------------------------------------- D1 replay
 @pytest.mark.skipif(not ENF10.exists(), reason="recorded enf10 run data not mounted")
 def test_d1_replay_enf10_histories():

@@ -204,6 +204,26 @@ def test_competition_one_scorecard_closed_after_last_finish(tmp_path):
     assert all(g.baseline is None and g.final_score == 0.0 for g in result.games)
 
 
+def test_competition_close_failing_at_last_finish_is_retried_at_teardown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+    calls = []
+
+    class FailingFirstClose(FakeArcade):
+        def close_scorecard(self, card_id):
+            calls.append(card_id)
+            if len(calls) <= 5:  # every attempt made from the last game's release fails
+                raise ConnectionError("gateway timeout")
+            super().close_scorecard(card_id)
+
+    arcade = FailingFirstClose(SIX, baselines=[])
+    r, _ = runner(tmp_path, lambda ctx: ctx.game.execute("ACTION1"), cfg=config(game_ids="competition"),
+                  arcade=arcade, mode=COMPETITION)
+    result = r.run()
+    assert len(calls) == 6 and arcade.closed == ["card-0"] and r.engine.scorecard.closed
+    assert len(result.games) == 6
+    assert "ConnectionError: gateway timeout" in capsys.readouterr().out  # the worker's error is reported
+
+
 def test_submission_mode_derives_cap_skips_benchmark_and_closes_before_deadline(tmp_path):
     arcade = FakeArcade(SIX)
 

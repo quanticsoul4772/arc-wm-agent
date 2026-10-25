@@ -152,7 +152,8 @@ try:
             WORKING / "submission.parquet", index=False)
     print(f"[notebook] done in {time.time() - NOTEBOOK_START_EPOCH:.0f}s", flush=True)
 finally:
-    setup_vllm.teardown(SERVER)
+    # In a submission the scorecard is closed by now; a teardown error must not fail the notebook.
+    setup_vllm.teardown(SERVER, raise_errors=not SUBMISSION)
 '''
 
 CODE_CELLS = [CELL_START, CELL_LOCATE, CELL_ARC_AGI, CELL_VLLM, CELL_RUN]

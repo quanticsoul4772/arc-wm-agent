@@ -30,6 +30,8 @@ CRASHED = "crashed"
 GRID_MAX = 63
 LEVEL_SCORE_CAP = 115.0
 DEFAULT_GATEWAY_URL = "http://gateway:8001/"
+# Waits before each retry of a failed scorecard close; arc_agi's close is one 10 s POST with no retry.
+CLOSE_RETRY_DELAYS_S = (2.0, 4.0, 8.0, 16.0)
 
 
 class EngineError(RuntimeError):
@@ -124,10 +126,29 @@ class SharedScorecard:
             self._close_locked()
 
     def _close_locked(self) -> None:
+        """Close with retries; `closed` is set only after a call succeeds, so a later close() tries again.
+        Raises the last error when every attempt fails."""
         if self.closed or self.card_id is None:
             return
-        self.closed = True
-        self._arcade.close_scorecard(self.card_id)
+        for attempt, delay in enumerate((0.0, *CLOSE_RETRY_DELAYS_S), 1):
+            time.sleep(delay)
+            try:
+                self._arcade.close_scorecard(self.card_id)
+            except Exception as exc:  # noqa: BLE001 - retried, then re-raised below
+                print(f"[engine] scorecard close attempt {attempt} failed: {type(exc).__name__}: {exc}", flush=True)
+                if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+                    if attempt == 1:
+                        raise  # the card was gone before this run closed it; a retry cannot help
+                    # The server answers 404 "scorecard ... not found" once a card is closed, so an earlier
+                    # attempt whose reply was lost (e.g. a timeout) did close it.
+                    print("[engine] scorecard already closed by an earlier attempt", flush=True)
+                    self.closed = True
+                    return
+                if attempt == len(CLOSE_RETRY_DELAYS_S) + 1:
+                    raise
+                continue
+            self.closed = True
+            return
 
 
 class Engine:
@@ -381,9 +402,9 @@ class Game:
             self.final_score = compute_score(self.baseline, self.actions_per_level, self.levels_completed)
             holds = self._holds_scorecard
             self._holds_scorecard = False
+        print(self.finished_line(), flush=True)  # before the release, which can raise if the close fails
         if holds and self.engine.scorecard is not None:
             self.engine.scorecard.release()
-        print(self.finished_line(), flush=True)
 
     @property
     def finished(self) -> bool:

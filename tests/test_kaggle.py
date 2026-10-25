@@ -268,6 +268,23 @@ def test_start_with_stub_exports_env_and_teardown_kills(tmp_path, monkeypatch):
     assert not (tmp_path / "vllm-openai-server.pid").exists()
 
 
+def test_teardown_error_raises_offline_and_is_printed_in_submission(monkeypatch, capsys):
+    def stuck(handle, grace_s):
+        raise RuntimeError("server process group 7 still alive after SIGKILL: [8]")
+
+    monkeypatch.setattr(setup_vllm, "_stop", stuck)
+    with pytest.raises(RuntimeError, match="still alive"):
+        setup_vllm.teardown(object())
+    setup_vllm.teardown(object(), raise_errors=False)
+    err = capsys.readouterr().err
+    assert "[setup_vllm] teardown error after the run: RuntimeError" in err and "Traceback" in err
+
+
+def test_notebook_teardown_does_not_raise_in_submission_mode():
+    nb = notebook.render("wm-src-x")
+    assert "setup_vllm.teardown(SERVER, raise_errors=not SUBMISSION)" in notebook.as_script(nb)
+
+
 def test_teardown_escalates_to_sigkill_and_kills_children(tmp_path):
     code = textwrap.dedent("""
         import signal, subprocess, sys, time
@@ -332,6 +349,35 @@ def competition_arcade(url: str, monkeypatch, api_key: str = "test-key-123"):
 def sim_status(url: str) -> dict:
     with urllib.request.urlopen(f"{url}/sim/status", timeout=10) as r:
         return json.loads(r.read())
+
+
+def test_sim_second_close_is_404_and_engine_counts_it_as_closed(sim, monkeypatch):
+    """The real client against the arc_agi server: the first close goes through but its reply is
+    "lost"; the retry gets the server's real 404 (an HTTPError with response.status_code 404), which
+    SharedScorecard counts as closed."""
+    import requests
+    from wmagent import engine as eng
+    _, url = sim
+    arcade = competition_arcade(url, monkeypatch)
+    errors = []
+
+    class LostReply:
+        def close_scorecard(self, card_id):
+            if not errors:
+                arcade.close_scorecard(card_id)  # reaches the server and closes the card
+                errors.append(None)
+                raise TimeoutError("read timed out")
+            try:
+                arcade.close_scorecard(card_id)
+            except requests.HTTPError as exc:
+                errors.append(exc.response.status_code)
+                raise
+
+    monkeypatch.setattr(eng, "CLOSE_RETRY_DELAYS_S", (0.0, 0.0, 0.0, 0.0))
+    shared = eng.SharedScorecard(LostReply())
+    shared.card_id = arcade.create_scorecard()
+    shared.close()
+    assert shared.closed and errors == [None, 404]
 
 
 def test_sim_competition_one_scorecard_each_game_once(sim, monkeypatch, tmp_path):

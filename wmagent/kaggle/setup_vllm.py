@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -202,7 +203,19 @@ def group_members(pgid: int) -> list[int]:
     return out
 
 
-def teardown(handle: ServerHandle, grace_s: float = KILL_GRACE_S) -> None:
+def teardown(handle: ServerHandle, grace_s: float = KILL_GRACE_S, raise_errors: bool = True) -> None:
+    """Stop the server (see `_stop`). With raise_errors=False (submission mode, where the scorecard is
+    already closed and an exception would fail the notebook) an error is printed with its traceback instead."""
+    try:
+        _stop(handle, grace_s)
+    except Exception as exc:  # noqa: BLE001 - reported, and re-raised unless the caller asked otherwise
+        if raise_errors:
+            raise
+        print(f"[setup_vllm] teardown error after the run: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        traceback.print_exc()
+
+
+def _stop(handle: ServerHandle, grace_s: float) -> None:
     """SIGTERM the server's process group, SIGKILL after `grace_s`, then remove site-packages."""
     if handle.torn_down:
         return

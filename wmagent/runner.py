@@ -308,6 +308,10 @@ class Runner:
                 for future in pending:
                     future.cancel()
                     futures[future].finish()  # stop flag is set, so it finishes as cancelled
+            for future, game in futures.items():  # a failed scorecard close surfaces here; _teardown retries it
+                if future.done() and not future.cancelled() and future.exception() is not None:
+                    exc = future.exception()
+                    print(f"[runner] {game.game_id}: {type(exc).__name__}: {exc}", flush=True)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
