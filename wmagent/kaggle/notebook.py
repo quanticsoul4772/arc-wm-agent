@@ -84,11 +84,39 @@ _spec.loader.exec_module(setup_vllm)
 
 AGENT_ENV = json.loads((BUNDLE / "agent_env.json").read_text())
 LLM_PORT = int(os.environ.get("WMAGENT_LLM_PORT", setup_vllm.PORT))
-SERVER = setup_vllm.start(
-    model_dir=MODEL_DIR, wheelhouse=WHEELHOUSE, working=WORKING, agent_env=AGENT_ENV,
-    server_cmd=[sys.executable, "-m", "wmagent.kaggle.stub_openai", "--port", str(LLM_PORT)] if STUB_LLM else None,
-    port=LLM_PORT,
-)
+SERVER = None
+_SERVER_ERROR = []
+
+def _start_server(base_env):
+    global SERVER
+    try:
+        if STUB_LLM:
+            time.sleep(float(os.environ.get("WMAGENT_STUB_DELAY_S", "0")))  # tests: a slow model load
+        SERVER = setup_vllm.start(
+            model_dir=MODEL_DIR, wheelhouse=WHEELHOUSE, working=WORKING, agent_env=AGENT_ENV,
+            server_cmd=[sys.executable, "-m", "wmagent.kaggle.stub_openai", "--port", str(LLM_PORT)] if STUB_LLM else None,
+            port=LLM_PORT, base_env=base_env,
+        )
+    except BaseException as exc:  # re-raised by _server_ready on the main thread
+        _SERVER_ERROR.append(exc)
+
+if SUBMISSION:
+    # A competition rerun loads the model in the background while the games are made and kept
+    # alive (Runner.run): a run with no move for 15 minutes is reported to end there.
+    import threading
+    _SERVER_THREAD = threading.Thread(target=_start_server, args=(dict(os.environ),), daemon=True)
+    _SERVER_THREAD.start()
+else:
+    _SERVER_THREAD = None
+    _start_server(dict(os.environ))
+    if _SERVER_ERROR:
+        raise _SERVER_ERROR[0]
+
+def _server_ready():
+    if _SERVER_THREAD is not None:
+        _SERVER_THREAD.join()
+    if _SERVER_ERROR:
+        raise _SERVER_ERROR[0]
 '''
 
 CELL_RUN = '''\
@@ -143,7 +171,8 @@ try:
     _mod, _fn = os.environ.get("WMAGENT_RUNNER", "wmagent.kaggle.entry:run").split(":")
     run = getattr(importlib.import_module(_mod), _fn)
     if SUBMISSION:
-        run(config, output_dir=str(WORKING), submission=True, notebook_start_epoch=NOTEBOOK_START_EPOCH)
+        run(config, output_dir=str(WORKING), submission=True, notebook_start_epoch=NOTEBOOK_START_EPOCH,
+            ready=_server_ready)
     else:
         with open(WORKING / "stdout.log", "a", encoding="utf-8") as _log, contextlib.redirect_stdout(_Tee(sys.stdout, _log)):
             run(config, output_dir=str(WORKING), submission=False, notebook_start_epoch=NOTEBOOK_START_EPOCH)
@@ -153,7 +182,10 @@ try:
     print(f"[notebook] done in {time.time() - NOTEBOOK_START_EPOCH:.0f}s", flush=True)
 finally:
     # In a submission the scorecard is closed by now; a teardown error must not fail the notebook.
-    setup_vllm.teardown(SERVER, raise_errors=not SUBMISSION)
+    if _SERVER_THREAD is not None:
+        _SERVER_THREAD.join(timeout=60)  # an early failure here must not leave a late launch running
+    if SERVER is not None:
+        setup_vllm.teardown(SERVER, raise_errors=not SUBMISSION)
 '''
 
 CODE_CELLS = [CELL_START, CELL_LOCATE, CELL_ARC_AGI, CELL_VLLM, CELL_RUN]

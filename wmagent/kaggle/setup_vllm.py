@@ -117,8 +117,8 @@ def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[st
     ]
 
 
-def server_env(site_packages: Path | None) -> dict[str, str]:
-    env = dict(os.environ)
+def server_env(site_packages: Path | None, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ if base_env is None else base_env)
     if site_packages is not None:
         env["PYTHONPATH"] = os.pathsep.join(p for p in (str(site_packages), env.get("PYTHONPATH", "")) if p)
     env.update({
@@ -248,7 +248,8 @@ def export_env(env: dict[str, str]) -> None:
 
 def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, agent_env: dict[str, str],
           server_cmd: list[str] | None = None, host: str = HOST, port: int = PORT,
-          check_gpu_first: bool = True, health_timeout_s: float = HEALTH_TIMEOUT_S) -> ServerHandle:
+          check_gpu_first: bool = True, health_timeout_s: float = HEALTH_TIMEOUT_S,
+          base_env: dict[str, str] | None = None) -> ServerHandle:
     """Bring the server up and export the agent env.
 
     `server_cmd` replaces the vLLM command (a stub server for local tests); with it,
@@ -270,7 +271,7 @@ def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, age
     else:
         cmd = list(server_cmd)
     base_url = f"http://{host}:{port}/v1"
-    handle = launch(cmd, server_env(site_packages), working / "vllm-openai-server.log",
+    handle = launch(cmd, server_env(site_packages, base_env), working / "vllm-openai-server.log",
                     working / "vllm-openai-server.pid", site_packages, base_url)
     try:
         wait_healthy(handle, timeout_s=health_timeout_s)

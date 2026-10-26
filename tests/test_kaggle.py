@@ -447,7 +447,7 @@ def test_sim_clone_to(tmp_path, monkeypatch):
 FAKE_RUNNER = '''
 """Stand-in for wmagent.runner.run used by the notebook tests: one scorecard, each game made once,
 a few legal actions per game (chosen after one chat call to the analyzer server), then close."""
-import json, logging, os, urllib.request
+import json, logging, os, time, urllib.request
 from pathlib import Path
 
 def _chat():
@@ -459,7 +459,7 @@ def _chat():
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
 
-def run(config, *, output_dir, submission, notebook_start_epoch):
+def run(config, *, output_dir, submission, notebook_start_epoch, ready=None):
     from arc_agi import Arcade, OperationMode
     from arcengine import GameAction
     log = logging.getLogger("fake-runner"); log.setLevel(logging.WARNING)
@@ -472,8 +472,12 @@ def run(config, *, output_dir, submission, notebook_start_epoch):
         game_ids = config["game_ids"]
     card = arcade.create_scorecard()
     played = {}
-    for gid in game_ids:
-        env = arcade.make(gid, scorecard_id=card)
+    envs = [(gid, arcade.make(gid, scorecard_id=card)) for gid in game_ids]
+    marks = {"makes_done": time.time()}
+    if ready is not None:
+        ready()  # the real runner keeps a game alive here; the fake only records the order
+    marks["ready"] = time.time()
+    for gid, env in envs:
         assert _chat() == "python"
         n = 0
         for _ in range(3):
@@ -487,6 +491,7 @@ def run(config, *, output_dir, submission, notebook_start_epoch):
     arcade.close_scorecard(card)
     Path(output_dir, "fake_runner.json").write_text(json.dumps(
         {"config": config, "submission": submission, "start": notebook_start_epoch, "played": played,
+         "marks": marks, "ready_given": ready is not None,
          "wmagent_file": __import__("wmagent").__file__,
          "env": {k: os.environ.get(k) for k in ("PROBE_ACTIONS", "LOCAL_ANALYZER_MODEL_ID", "ONLY_RESET_LEVELS",
                                                   "OPERATION_MODE", "LIBRARY_PATH")}}))
@@ -600,7 +605,8 @@ def test_notebook_competition_end_to_end(tmp_path, notebook_python):
         env=sim_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
-        env.update({"KAGGLE_IS_COMPETITION_RERUN": "true", "ARC_BASE_URL": f"http://127.0.0.1:{port}/"})
+        env.update({"KAGGLE_IS_COMPETITION_RERUN": "true", "ARC_BASE_URL": f"http://127.0.0.1:{port}/",
+                    "WMAGENT_STUB_DELAY_S": "8"})  # a slow model load: the games must be made first
         run_notebook(notebook_python, script, env, tmp_path)  # the notebook itself waits for the gateway
         st = sim_status(f"http://127.0.0.1:{port}")
     finally:
@@ -610,6 +616,7 @@ def test_notebook_competition_end_to_end(tmp_path, notebook_python):
     cfg = res["config"]
     assert res["submission"] is True and cfg["game_ids"] == "competition" and cfg["n_passes"] == 1
     assert cfg["environments_dir"] is None and len(res["played"]) == 8
+    assert res["ready_given"] and res["marks"]["ready"] >= res["marks"]["makes_done"]  # games made, then the server waited for
     assert res["env"]["OPERATION_MODE"] == "competition"
     assert st["scorecards_opened"] == 1 and len(st["scorecards_closed"]) == 1
     assert st["makes"] == {gid: 1 for gid in res["played"]}

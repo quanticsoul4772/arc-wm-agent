@@ -333,3 +333,56 @@ def test_e_benchmark_json_loads_in_analyze(tmp_path):
     assert [row["stem"] for row in rows] == [f"{PROBE_GAMES[0]}_p0", f"{PROBE_GAMES[1]}_p0",
                                              f"{PROBE_GAMES[0]}_p1", f"{PROBE_GAMES[1]}_p1"]
     assert all(row["tokens"] == 42 and row["actions"] == 1 and not row["crashed"] for row in rows)
+
+
+# ------------------------------------------------- idle guard: make first, keep alive, then play
+def test_ready_runs_after_makes_and_keepalive_resets_until_it_returns(tmp_path, monkeypatch, capsys):
+    import wmagent.runner as rmod
+    monkeypatch.setattr(rmod, "KEEPALIVE_S", 0.05)
+    arcade = FakeArcade(SIX, baselines=[])
+    order = []
+
+    def play(ctx: PlayContext) -> None:
+        order.append(("play", len(arcade.made)))
+        ctx.game.execute("ACTION1")
+
+    def ready() -> None:
+        order.append(("ready", len(arcade.made)))
+        time.sleep(0.4)
+
+    r, _ = runner(tmp_path, play, cfg=config(game_ids="competition"), arcade=arcade, mode=COMPETITION)
+    result = r.run(ready)
+    assert order[0] == ("ready", 6) and all(o[0] == "play" for o in order[1:]) and len(order) == 7
+    kept = [g for g in result.games if any(s.action.name == "RESET" for s in g.history)]
+    assert len(kept) == 1 and sum(1 for s in kept[0].history if s.action.name == "RESET") >= 3
+    assert arcade.created == ["card-0"] and arcade.closed == ["card-0"] and len(arcade.made) == 6
+    assert "keepalive RESET on" in capsys.readouterr().out
+
+
+def test_no_ready_means_no_keepalive(tmp_path, monkeypatch):
+    import wmagent.runner as rmod
+    monkeypatch.setattr(rmod, "KEEPALIVE_S", 0.01)
+
+    def play(ctx: PlayContext) -> None:
+        time.sleep(0.05)
+        ctx.game.execute("ACTION1")
+
+    r, _ = runner(tmp_path, play, cfg=config(n_passes=1))
+    result = r.run()
+    assert all([s.action.name for s in g.history] == ["ACTION1"] for g in result.games)
+
+
+def test_ready_failure_still_finishes_games_and_closes_the_scorecard(tmp_path, monkeypatch, capsys):
+    import wmagent.runner as rmod
+    monkeypatch.setattr(rmod, "KEEPALIVE_S", 10.0)
+    arcade = FakeArcade(SIX, baselines=[])
+    played = []
+
+    def ready() -> None:
+        raise RuntimeError("vllm failed")
+
+    r, _ = runner(tmp_path, lambda ctx: played.append(1), cfg=config(game_ids="competition"), arcade=arcade,
+                  mode=COMPETITION)
+    result = r.run(ready)
+    assert played == [] and arcade.closed == ["card-0"] and all(g.finished for g in result.games)
+    assert "vllm failed" in capsys.readouterr().out

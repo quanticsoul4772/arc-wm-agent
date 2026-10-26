@@ -24,6 +24,9 @@ from typing import Any
 from .engine import COMPETITION, OFFLINE, PLAYING, WON, Engine, Game
 
 HEARTBEAT_S = 600.0
+# While the model server loads after the games are made, one RESET to one game every this many
+# seconds: a run with no move for 15 minutes is reported to end with its score so far.
+KEEPALIVE_S = float(os.environ.get("WMAGENT_KEEPALIVE_S", "600"))
 MIN_REQUEST_TIMEOUT_S = 0.1
 
 
@@ -226,7 +229,9 @@ class Runner:
         return cap
 
     # ---------------------------------------------------------------- run
-    def run(self) -> RunResult:
+    def run(self, ready: Callable[[], None] | None = None) -> RunResult:
+        """`ready`, if given, blocks until the model server is up: the games are made first and
+        kept alive by a RESET every KEEPALIVE_S seconds until it returns."""
         self.start_time = datetime.now()
         if self.config.competition:
             game_ids = self.engine.available_game_ids()
@@ -245,6 +250,8 @@ class Runner:
         heartbeat.start()
         try:
             self._start_all(runs)
+            if ready is not None:
+                self._wait_ready(ready)
             cap = self._per_game_cap(deadline, len(runs))
             self._play_all(deadline, cap)
         except Exception as exc:  # noqa: BLE001 - a solver-level error is printed, teardown still runs
@@ -332,6 +339,27 @@ class Runner:
             tmp.replace(path)
         print(summary_text(self.config.label, self.games, n_passes, self.start_time, end), flush=True)
         return RunResult(list(self.games), self.start_time, end, path)
+
+    def _wait_ready(self, ready: Callable[[], None]) -> None:
+        stop = threading.Event()
+        keepalive = threading.Thread(target=self._keepalive, args=(stop,), daemon=True)
+        keepalive.start()
+        try:
+            ready()
+        finally:
+            stop.set()
+            keepalive.join()  # no RESET may overlap the first frame a session reads
+
+    def _keepalive(self, stop: threading.Event) -> None:
+        while not stop.wait(KEEPALIVE_S):
+            game = next((g for g in self.games if g.state == PLAYING and not g.finished), None)
+            if game is None:
+                return
+            try:
+                game.execute("RESET")
+                print(f"[runner] keepalive RESET on {game.label} while the model server loads", flush=True)
+            except Exception as exc:  # noqa: BLE001 - a failed keepalive must not end the run
+                print(f"[runner] keepalive RESET failed on {game.label}: {type(exc).__name__}: {exc}", flush=True)
 
     def _heartbeat(self, stop: threading.Event, n_passes: int) -> None:
         while not stop.wait(self.heartbeat_s):
