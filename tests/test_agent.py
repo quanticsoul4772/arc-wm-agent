@@ -719,12 +719,13 @@ def test_gate_section_states_interface_and_rules_only():
 
 
 def test_system_prompt_parity_items_round_11():
-    """Parity review (report 83d1820): generic scorer/search guidance with an emphasized search instruction,
+    """Parity review (report 83d1820): generic scoring/search guidance (reworded at the same size on 2026-10-26,
+    after the clean-room audit) with an emphasized search instruction,
     no concrete simulation hint or data-structure tips, the restored probing/search facts, an uppercase
     edge-bar warning, and no notes-memory facts."""
     system = prompts.system_prompt("forced", 8)
     habits = system[system.index("== Python habits"):system.index("== Visual cues")]
-    assert "scorer for candidate actions or a search over candidate sequences" in habits
+    assert "rank the possible actions with a scoring function or explore sequences of moves" in habits
     assert "IMPORTANT:" in habits and "BFS" in habits and "explicit search algorithm" in habits
     for absent in ("copy of the board state", "(row, col) pairs", "deepcopy", "Counter", "breadth-first search over"):
         assert absent not in habits, absent

@@ -133,8 +133,8 @@ instead of listing every cell.
 - Write small helpers inside a cell, for example one that returns the cells of a given colour, one that gives \
 a bounding box, or one that finds a shape again after a move, and print compact summaries instead of raw data.
 - Compute positions, counts and distances in code rather than estimating them from the picture.
-- When choosing moves, write a scorer for candidate actions or a search over candidate sequences instead of \
-picking by eye.
+- When choosing moves, rank the possible actions with a scoring function or explore sequences of moves \
+in code, not by eye.
 - IMPORTANT: when a goal needs several moves, above all for navigation, write an explicit search algorithm in \
 code: BFS, DFS, flood fill, shortest-path or other pathfinding, beam search, or a bounded search over short \
 action sequences. Do not plan long move sequences in your head.
