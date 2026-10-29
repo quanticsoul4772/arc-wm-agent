@@ -17,7 +17,7 @@ from typing import Any
 import requests
 
 from wmagent import prompts
-from wmagent.world_model_gate import BACKTEST_DRIVER, WorldModelGate
+from wmagent.world_model_gate import BACKTEST_DRIVER, WorldModelGate, mechanisms_from_env
 
 # ---------------------------------------------------------------------------
 # configuration (read from the environment at import time; names are the interface)
@@ -58,6 +58,7 @@ class AgentConfig:
     enable_thinking: bool
     multimodal_context: str
     multimodal_upscale: int
+    mechanisms: str = "base"
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -80,6 +81,7 @@ class AgentConfig:
             enable_thinking=_env_bool("LOCAL_ANALYZER_ENABLE_THINKING", True),
             multimodal_context=_env("MULTIMODAL_CONTEXT", "current_grid"),
             multimodal_upscale=_env_num("MULTIMODAL_UPSCALE", 4, int),
+            mechanisms=mechanisms_from_env(),
         )
 
     @property
@@ -570,7 +572,7 @@ class ToolAgent:
         self.clock = clock
         self.http = requests.Session()
         self.system_prompt = prompts.system_prompt(
-            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8)
+            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8, self.config.mechanisms)
         self._state_path: Path | None = None
         self._new_game()
 
@@ -886,6 +888,7 @@ class ToolAgent:
                 self.gate.observe_level(_current_level(ctx.state_path))
                 refusal = self.gate.check_action(len(items))
                 if refusal is not None:
+                    cell.refusal = refusal
                     raise refused(refusal)
             payload = ctx.step_env({"actions": items})
             result = compact_result(payload)
@@ -911,9 +914,17 @@ class ToolAgent:
         outcome = run_python(code=to_run, timeout_seconds=self.config.tool_timeout,
                              initial_state=self._state(ctx), action_handler=handle)
         had_error = bool(outcome.get("error"))
+        gate_note = None
         if self.gate is not None:
-            self.gate.after_cell(code, had_error, lambda src: self._backtest(src, ctx))
-        return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens)
+            # M1a: a cell whose only error is the gate's own refusal ran its definitions before the refused
+            # action(), so its predict is captured and judged. Matched on the error text, not a flag, so a cell
+            # that catches the refusal and then fails for another reason still counts as errored.
+            refusal_only = (self.gate.evaluate_on_deny and had_error and cell.refusal is not None
+                            and str(outcome["error"]).rstrip().endswith("RuntimeError: " + cell.refusal))
+            self.gate.after_cell(code, had_error and not refusal_only, lambda src: self._backtest(src, ctx))
+            if refusal_only:
+                gate_note = self.gate.verdict_note()
+        return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens, gate_note)
 
     def _state(self, ctx: _TurnContext) -> dict[str, Any]:
         return sandbox_state(load_runtime_state(ctx.state_path), ctx.valid_actions, self.last_action_result)
@@ -955,6 +966,7 @@ class ToolAgent:
 class _Cell:
     latched: str | None = None
     latched_result: dict[str, Any] = field(default_factory=dict)
+    refusal: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -989,7 +1001,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, Any]], limit: int,
-                       tool_output_tokens: int | None = None) -> str:
+                       tool_output_tokens: int | None = None, gate_note: str | None = None) -> str:
     tokens = tool_output_tokens if tool_output_tokens is not None else limit // 4
     cut = _Truncator(limit)
     stdout = outcome.get("stdout") or ""
@@ -997,6 +1009,8 @@ def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, A
         body: dict[str, Any] = {"tool": "python", "error": cut(str(outcome["error"]))}
         if stdout:
             body["stdout"] = cut(str(stdout))
+        if gate_note:
+            body["gate"] = gate_note
         return json.dumps(cut.finish(body, tokens), indent=2)
     # Exactly one of: stdout, else result, else the single action result, else the action summary;
     # the last two go under `result` too (the original's precedence).

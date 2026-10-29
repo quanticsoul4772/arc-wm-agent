@@ -53,6 +53,17 @@ PREQUENTIAL_FLOOR = 0.5
 HELDOUT_N = 3
 HELDOUT_PASS_HITS = 3
 
+# WM_MECHANISMS (Plan C arms): "base" is the harness as it was, "m1a" adds capture-on-deny and the
+# stated acceptance rule, "all" adds every Plan C mechanism. Read only in from_env / AgentConfig.from_env.
+MECHANISMS = ("base", "m1a", "all")
+
+
+def mechanisms_from_env() -> str:
+    value = os.environ.get("WM_MECHANISMS", "").strip().lower() or "base"
+    if value not in MECHANISMS:
+        raise ValueError(f"WM_MECHANISMS must be one of {MECHANISMS}, got {value!r}")
+    return value
+
 SKELETON_PREDICT = '''def predict(ascii, action):
     # TODO: replace with the game's dynamics: return the board after `action`.
     return ascii'''
@@ -177,6 +188,10 @@ class WorldModelGate:
     ever_accepted: bool = False
     optional: bool = False
     confirmed: bool = False
+    mechanisms: str = "base"
+    # Outcome of the last after_cell: None when no predict was captured, else the verdict dict
+    # (with "passed"); read by the agent to tell the model what happened to its predict.
+    last_verdict: dict[str, Any] | None = None
 
     @classmethod
     def from_env(cls) -> WorldModelGate | None:
@@ -187,7 +202,12 @@ class WorldModelGate:
             max_refusals=_env_int("PROBE_MAX_REFUSALS", 8),
             release_after_accept=os.environ.get("PROBE_RELEASE_AFTER_ACCEPT", "").strip() == "1",
             optional=os.environ.get("PROBE_OPTIONAL", "").strip() == "1",
+            mechanisms=mechanisms_from_env(),
         )
+
+    @property
+    def evaluate_on_deny(self) -> bool:
+        return self.mechanisms != "base"
 
     def reset(self, state_path: Path) -> None:
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
@@ -204,12 +224,18 @@ class WorldModelGate:
         self.heldout = []
         self.ever_accepted = False
         self.confirmed = False
+        self.last_verdict = None
+        # The manifest: what this run actually enforces, so each arm is confirmed from its logs.
         self._log(
             "session_start",
             probe_actions=self.probe_actions,
             max_refusals=self.max_refusals,
             release_after_accept=self.release_after_accept,
             optional=self.optional,
+            mechanisms=self.mechanisms,
+            change_floor=CHANGE_FLOOR,
+            min_informative=MIN_INFORMATIVE,
+            pass_accuracy=PASS_ACCURACY,
         )
 
     def _log(self, event: str, **fields: Any) -> None:
@@ -218,6 +244,23 @@ class WorldModelGate:
         record = {"t": time.time(), "event": event, **fields}
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+
+    def verdict_note(self) -> str | None:
+        """What happened to the predict captured by the last cell, for a cell whose action() was refused:
+        the refusal text was written before the backtest ran, so it says nothing about this predict."""
+        verdict = self.last_verdict
+        if verdict is None:
+            return None
+        if verdict["passed"]:
+            return "World-model gate: your predict was accepted on this level; action() is unblocked."
+        if verdict.get("reason") == "backtest_failed":
+            return "World-model gate: your predict was captured but its backtest failed to run."
+        return (
+            f"World-model gate: your predict was captured but not accepted: it matched "
+            f"{round(verdict['accuracy'] * verdict['informative'])} of {verdict['informative']} informative moves "
+            f"(needs at least {MIN_INFORMATIVE} moves that change more than {CHANGE_FLOOR} cells, "
+            f"and at least {int(PASS_ACCURACY * 100)}% of them matched)."
+        )
 
     def note_backtest_error(self, error: str) -> None:
         self._log("backtest_error", level=self.level, error=str(error)[:300])
@@ -298,12 +341,14 @@ class WorldModelGate:
         errored: bool,
         run_backtest: Callable[[str], list[list[Any]] | None],
     ) -> None:
+        self.last_verdict = None
         captured = None if errored else extract_definitions(code)
         if captured is not None:
             candidate = dict(self.store)
             candidate.update(captured)
             rows = run_backtest("\n\n".join(candidate.values()))
             verdict = self._judge(rows)
+            self.last_verdict = verdict
             self._log("captured", level=self.level, names=sorted(captured), **verdict)
             if verdict["passed"]:
                 self.store = candidate

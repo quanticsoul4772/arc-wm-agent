@@ -60,7 +60,7 @@ def agent_env(a: argparse.Namespace) -> dict[str, str]:
     env.update({
         "PROBE_ENFORCE": str(a.probe_enforce), "PROBE_ACTIONS": str(a.probe_actions),
         "PROBE_MAX_REFUSALS": str(a.probe_max_refusals), "PROBE_RELEASE_AFTER_ACCEPT": str(a.probe_release_after_accept),
-        "PROBE_OPTIONAL": str(a.probe_optional),
+        "PROBE_OPTIONAL": str(a.probe_optional), "WM_MECHANISMS": a.wm_mechanisms,
     })
     return env
 
@@ -202,6 +202,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
+    ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all"], default="base",
+                    help="Plan C arm: base (as before), m1a (capture-on-deny + stated rule), all")
     ap.add_argument("--license", default="unknown", help="Kaggle dataset license name")
     ap.add_argument("--public", action="store_true", help="make the kernel public (default private)")
     ap.add_argument("--dry-run", action="store_true", help="only write files")

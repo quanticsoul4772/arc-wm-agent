@@ -242,15 +242,44 @@ informative real moves; until then it returns a message saying so.
 """
 
 
-def gate_addendum_forced(probe_actions: int) -> str:
+# WM_MECHANISMS m1a / all: the same section with the acceptance rule the gate enforces (the "base" text omits
+# the move minimum and the change floor) and capture-on-deny (a predict in a cell whose action() is refused is
+# still kept and judged).
+GATE_ADDENDUM_FORCED_M1A = """
+== Executable world model (required) ==
+Besides your notes, keep a runnable model of the game: a top-level function `predict(ascii, action)`. Its \
+`ascii` argument is a board in the same text form as `current_frame.ascii`, its `action` argument is a move \
+label in the same form as the `.action` of a transition, and it returns the board text you expect after that \
+move. A do-nothing placeholder stands in for it at the start of a game and must be replaced.
+- When a cell that defines `predict` runs, its top-level functions, classes, imports and constants are kept \
+and placed in front of every later cell, even if the cell's `action()` call was refused. Defining `predict` \
+again replaces it. The tool result tells you whether it was accepted.
+- After each cell the stored `predict` is backtested on this level's recorded moves that changed more than \
+{change_floor} cells. It is accepted once there are at least {min_informative} such moves and it reproduces \
+at least {pass_percent}% of them, with a tolerance of a few cells.
+- On each level you may spend {probe_actions} real actions before a model is accepted; spend them on moves \
+that change the board, so the backtest has enough informative moves. After that, `action()` is refused until \
+`predict` is accepted and keeps predicting the new moves you make.
+- Once your model is accepted, use it to search for a plan, for example breadth-first over predicted boards, \
+before you spend real actions.
+"""
+
+
+def gate_addendum_forced(probe_actions: int, mechanisms: str = "base") -> str:
     """The required-model section, last in the system prompt: interface and rules only, no code."""
-    return GATE_ADDENDUM_FORCED.replace("{probe_actions}", str(probe_actions))
+    if mechanisms == "base":
+        return GATE_ADDENDUM_FORCED.replace("{probe_actions}", str(probe_actions))
+    from wmagent.world_model_gate import CHANGE_FLOOR, MIN_INFORMATIVE, PASS_ACCURACY
+
+    return (GATE_ADDENDUM_FORCED_M1A.replace("{probe_actions}", str(probe_actions))
+            .replace("{change_floor}", str(CHANGE_FLOOR)).replace("{min_informative}", str(MIN_INFORMATIVE))
+            .replace("{pass_percent}", str(int(PASS_ACCURACY * 100))))
 
 
-def system_prompt(gate_mode: str | None = None, probe_actions: int = 8) -> str:
-    """The system prompt; `gate_mode` is None, "forced" or "optional"."""
+def system_prompt(gate_mode: str | None = None, probe_actions: int = 8, mechanisms: str = "base") -> str:
+    """The system prompt; `gate_mode` is None, "forced" or "optional"; `mechanisms` is the WM_MECHANISMS arm."""
     if gate_mode == "forced":
-        return SYSTEM_PROMPT_BASE + gate_addendum_forced(probe_actions)
+        return SYSTEM_PROMPT_BASE + gate_addendum_forced(probe_actions, mechanisms)
     if gate_mode == "optional":
         return SYSTEM_PROMPT_BASE + GATE_ADDENDUM_OPTIONAL
     return SYSTEM_PROMPT_BASE
