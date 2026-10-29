@@ -111,7 +111,7 @@ def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[st
         "--model", str(model_dir), "--served-model-name", SERVED_MODEL,
         "--host", host, "--port", str(port), "--tensor-parallel-size", "1",
         "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3",
-        "--generation-config", "vllm", "--enable-prefix-caching",
+        "--generation-config", "vllm", "--enable-prefix-caching", "--enable-prompt-tokens-details",
         "--default-chat-template-kwargs", json.dumps({"preserve_thinking": True}),
         "--max-model-len", "65536",
     ]

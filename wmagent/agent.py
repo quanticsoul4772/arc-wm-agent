@@ -594,6 +594,8 @@ class ToolAgent:
         self._recovered_ids = 0
         self._saved_history: list[dict[str, Any]] = []
         self._system_logged = False
+        self._request_counter = 0  # per game: names snapshots and request-log rows (a yield keeps the step)
+        self._continuing = False  # M2c: the last turn yielded with its history kept
 
     def sandbox(self) -> tuple[Callable[..., dict[str, Any]], type[Exception]]:
         if self._sandbox is None:
@@ -713,11 +715,18 @@ class ToolAgent:
         if self.last_summary is not None:
             level = max(level, int(self.last_summary.get("level") or 1))
         seen = [int((entry.get("frame") or {}).get("level") or 1) for entry in runtime.get("history") or []]
-        text = prompts.user_prompt(
-            step=max(int(frame.get("step") or 0), action_count) + 1, level=level,
-            max_level_seen=max([level, *seen]), valid_actions=valid_actions, notes=self.notes,
-            previous_summary=self.last_summary,
-        )
+        next_step = max(int(frame.get("step") or 0), action_count) + 1
+        if self._continuing:
+            # M2c: the previous turn yielded without playing and its history was kept, so the full prompt and
+            # turn guide would only be re-sent; a short note keeps the open turn going.
+            text = prompts.continuation_prompt(step=next_step, level=level, valid_actions=valid_actions)
+        else:
+            text = prompts.user_prompt(
+                step=next_step, level=level,
+                max_level_seen=max([level, *seen]), valid_actions=valid_actions, notes=self.notes,
+                previous_summary=self.last_summary,
+            )
+        self._continuing = False
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         if self.config.multimodal_context == "current_grid" and frame.get("grid"):
             url = grid_png_data_url(frame["grid"], self.config.multimodal_upscale)
@@ -748,11 +757,16 @@ class ToolAgent:
             if self.config.tool_steps > 0 and requests_made >= self.config.tool_steps:
                 return self._finish_turn(messages, ctx, reasoning_seen, transcript, yielded="tool_step_limit")
             timeout = request_timeout() if callable(request_timeout) else request_timeout
+            before_trim = len(messages)
             messages = trim_messages(messages, self.config.budget)
-            self._snapshot(state_path, step, requests_made, messages)
+            self._request_counter += 1
+            self._snapshot(state_path, step, self._request_counter, messages)
+            sent = len(messages)
+            request_started = time.time()
             reply, messages = self._request_with_trim(messages, timeout)
             requests_made += 1
             generated = self._account(reply["usage"])
+            self._log_request(state_path, step, requests_made, request_started, before_trim, sent, messages, reply)
             message = reply["message"]
             raw_content = message.get("content") or ""
             raw_reasoning = clean_text(message.get("reasoning") or message.get("reasoning_content") or "")
@@ -846,6 +860,10 @@ class ToolAgent:
                 for key in prompts.LEVEL_SCOPED_NOTES:
                     self.notes.pop(key, None)
         reasoning = "\n".join(reasoning_seen)
+        # M2c: continue with a short prompt only when this turn's own messages were kept; after a reverted
+        # history the model would not see what it was doing, so the next turn gets the full prompt.
+        self._continuing = (self.config.mechanisms == "all" and bool(yielded) and not ctx.executed_any
+                            and persist and yielded != "stop_requested")
         if yielded and not ctx.executed_any:
             self._log(transcript, "STATUS", f"yield: {yielded}")
             return self._outcome(False, yielded=True, reasoning=reasoning, yield_reason=yielded)
@@ -952,6 +970,8 @@ class ToolAgent:
             handle.write(f"\n===== {section} =====\n{body}\n")
 
     def _snapshot(self, state_path: Path, step: int, request_index: int, messages: list[dict[str, Any]]) -> None:
+        """One file per request (`request_index` counts the game's requests), so a yield, which keeps the
+        analysis step, no longer overwrites the previous request's snapshot."""
         if self.prompts_dir is None:
             return
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
@@ -959,7 +979,27 @@ class ToolAgent:
         folder.mkdir(parents=True, exist_ok=True)
         record = {"step": step, "request": request_index, "message_count": len(messages),
                   "estimated_tokens": round(estimate_tokens(messages)), "messages": _elide_images(messages)}
-        (folder / f"step_{step:04d}.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+        (folder / f"step_{step:04d}_r{request_index:05d}.json").write_text(json.dumps(record, indent=1),
+                                                                          encoding="utf-8")
+
+    def _log_request(self, state_path: Path, step: int, turn_request: int, started: float, before_trim: int,
+                     sent: int, final: list[dict[str, Any]], reply: dict[str, Any]) -> None:
+        """M4a context monitor: one row per chat request in <stem>_requests.jsonl next to the state file
+        (logging only). `trimmed` counts messages dropped by the budget trim before the request and by the
+        context-length retry; cached tokens need the server's --enable-prompt-tokens-details (null when 0)."""
+        usage = reply.get("usage") or {}
+        stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
+        row = {
+            "t_start": round(started, 3), "t_end": round(time.time(), 3), "step": step,
+            "request": self._request_counter, "turn_request": turn_request,
+            "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
+            "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+            "estimated_tokens": round(estimate_tokens(final)), "message_count": len(final),
+            "trimmed": (before_trim - sent) + (sent - len(final)), "finish_reason": reply.get("finish_reason"),
+        }
+        path = state_path.with_name(f"{stem}_requests.jsonl")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
 
 
 @dataclass

@@ -425,6 +425,22 @@ def user_prompt(
     return "\n\n".join(lines)
 
 
+CONTINUATION_TEXT = (
+    "Step {step}, level {level}. Your turn is still open: nothing has been played since your last message, so "
+    "the conversation above is current and the attached image is the same board. Labels accepted right now: "
+    "{labels}. Carry on from where you were: finish the analysis you started and play with action(...) from a "
+    "python cell."
+)
+
+
+def continuation_prompt(*, step: int, level: int, valid_actions: list[str]) -> str:
+    """WM_MECHANISMS=all: the user message after a turn that yielded without playing (M2c)."""
+    labels = ", ".join(valid_actions) if valid_actions else "none"
+    if "MOUSE" in valid_actions:
+        labels += " (" + MOUSE_ARGUMENTS + ")"
+    return CONTINUATION_TEXT.format(step=step, level=level, labels=labels)
+
+
 WORLD_MODEL_MANDATE = (
     "IMPORTANT: GIVE YOUR REVISED WORLD MODEL BEFORE YOU EXECUTE ANY NEW ACTION. By default, copy your "
     "previous world model and adjust it to the new evidence; the labelled prefixes are optional helpers."
