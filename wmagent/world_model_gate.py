@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wmagent.game_class import GateProfile, classify, profile_for, shadow_profiles
+
 PREDICT_PATTERN = re.compile(r"^def predict\(", re.MULTILINE)
 
 CHANGE_FLOOR = 2
@@ -189,6 +191,7 @@ class WorldModelGate:
     optional: bool = False
     confirmed: bool = False
     mechanisms: str = "base"
+    game_class: str | None = None
     # Outcome of the last after_cell: None when no predict was captured, else the verdict dict
     # (with "passed"); read by the agent to tell the model what happened to its predict.
     last_verdict: dict[str, Any] | None = None
@@ -233,15 +236,15 @@ class WorldModelGate:
             release_after_accept=self.release_after_accept,
             optional=self.optional,
             mechanisms=self.mechanisms,
-            change_floor=CHANGE_FLOOR,
-            min_informative=MIN_INFORMATIVE,
-            pass_accuracy=PASS_ACCURACY,
+            change_floor=self.base_profile.change_floor,
+            min_informative=self.base_profile.min_informative,
+            pass_accuracy=self.base_profile.pass_accuracy,
         )
 
     def _log(self, event: str, **fields: Any) -> None:
         if self.log_path is None:
             return
-        record = {"t": time.time(), "event": event, **fields}
+        record = {"t": time.time(), "event": event, "game_class": self.game_class, **fields}
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 
@@ -258,8 +261,8 @@ class WorldModelGate:
         return (
             f"World-model gate: your predict was captured but not accepted: it matched "
             f"{round(verdict['accuracy'] * verdict['informative'])} of {verdict['informative']} informative moves "
-            f"(needs at least {MIN_INFORMATIVE} moves that change more than {CHANGE_FLOOR} cells, "
-            f"and at least {int(PASS_ACCURACY * 100)}% of them matched)."
+            f"(needs at least {self.profile.min_informative} moves that change more than "
+            f"{self.profile.change_floor} cells, and at least {int(self.profile.pass_accuracy * 100)}% of them matched)."
         )
 
     def note_backtest_error(self, error: str) -> None:
@@ -291,19 +294,48 @@ class WorldModelGate:
         self.heldout = []
         self.confirmed = False
 
+    # --- profile (M3: one source for the gate, the prompt and the logs) ---
+
+    @property
+    def base_profile(self) -> GateProfile:
+        return GateProfile(probe_actions=self.probe_actions, change_floor=CHANGE_FLOOR,
+                           min_informative=MIN_INFORMATIVE, pass_accuracy=PASS_ACCURACY,
+                           blocked_call_release=self.max_refusals, forced=not self.optional)
+
+    @property
+    def profile(self) -> GateProfile:
+        return profile_for(self.game_class, self.base_profile)
+
+    def observe_class(self, valid_actions: list[str]) -> None:
+        # No event of its own (the event sequence stays as before): every record carries `game_class`,
+        # so a change shows in the field of the next record.
+        game_class = classify(valid_actions)
+        if game_class is not None:
+            self.game_class = game_class
+
+    def _shadow(self, requested: int) -> dict[str, bool]:
+        """Would each shadow profile also refuse this request? Logged only, never enforced."""
+        out = {}
+        for name, alt in shadow_profiles(self.profile).items():
+            remaining = alt.probe_actions - self.level_actions
+            out[name] = alt.forced and requested > max(0, remaining)
+        return out
+
     def check_action(self, requested: int) -> str | None:
         """None if the actions may run; otherwise the refusal message."""
-        if self.optional:
+        profile = self.profile
+        if not profile.forced:
             return None
         if self.released or self._model_ok():
             return None
         if self.release_after_accept and self.ever_accepted:
             return None
-        remaining = self.probe_actions - self.level_actions
+        remaining = profile.probe_actions - self.level_actions
         if remaining > 0:
             if requested <= remaining:
                 return None
-            self._log("batch_capped", level=self.level, requested=requested, remaining=remaining)
+            self._log("batch_capped", level=self.level, requested=requested, remaining=remaining,
+                      shadow=self._shadow(requested))
             return (
                 f"World-model gate: at most {remaining} more action(s) are allowed on this level "
                 "before an accepted `predict(ascii, action)` is required. Send a smaller batch."
@@ -313,12 +345,13 @@ class WorldModelGate:
             self.released = True
             self._log("released_sim_free", level=self.level, refusals=self.refusals - 1)
             return None
-        self._log("refused", level=self.level, refusal=self.refusals, requested=requested)
+        self._log("refused", level=self.level, refusal=self.refusals, requested=requested,
+                  shadow=self._shadow(requested))
         return (
             "World-model gate: action() is blocked. Define `def predict(ascii, action)` in a python "
             "cell (top level) that returns the next board ascii for a given board ascii and action "
             "string; the harness backtests it on recorded transitions and unblocks actions once it "
-            f"predicts at least {int(PASS_ACCURACY * 100)}% of informative transitions. "
+            f"predicts at least {int(profile.pass_accuracy * 100)}% of informative transitions. "
             f"Refusal {self.refusals} of {self.max_refusals}."
         )
 
@@ -329,7 +362,7 @@ class WorldModelGate:
         if self.accepted_at is None:
             return False
         recent = self.prequential[-PREQUENTIAL_WINDOW:]
-        if len(recent) < MIN_INFORMATIVE:
+        if len(recent) < self.profile.min_informative:
             return True
         return sum(recent) / len(recent) >= PREQUENTIAL_FLOOR
 
@@ -383,12 +416,13 @@ class WorldModelGate:
         if rows is None:
             return {"passed": False, "reason": "backtest_failed", "n_transitions": 0}
         scoped = [r for r in rows if self.level is None or len(r) < 5 or r[4] == self.level]
-        informative = [r for r in scoped if r[1] > CHANGE_FLOOR]
+        profile = self.profile
+        informative = [r for r in scoped if r[1] > profile.change_floor]
         hits = [r for r in informative if _is_hit(r[1], r[2])]
         accuracy = len(hits) / len(informative) if informative else 0.0
         n_transitions = (max(r[0] for r in rows) + 1) if rows else 0
         return {
-            "passed": len(informative) >= MIN_INFORMATIVE and accuracy >= PASS_ACCURACY,
+            "passed": len(informative) >= profile.min_informative and accuracy >= profile.pass_accuracy,
             "accuracy": round(accuracy, 3),
             "informative": len(informative),
             "errors": sum(1 for r in rows if r[3]),
@@ -403,7 +437,7 @@ class WorldModelGate:
             if index <= self.scored_through:
                 continue
             self.scored_through = index
-            if changed <= CHANGE_FLOOR:
+            if changed <= self.profile.change_floor:
                 continue
             hit = _is_hit(changed, miss)
             self.prequential.append(hit)

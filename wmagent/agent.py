@@ -572,7 +572,8 @@ class ToolAgent:
         self.clock = clock
         self.http = requests.Session()
         self.system_prompt = prompts.system_prompt(
-            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8, self.config.mechanisms)
+            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8, self.config.mechanisms,
+            self.gate.profile if self.gate is not None else None)
         self._state_path: Path | None = None
         self._new_game()
 
@@ -904,6 +905,7 @@ class ToolAgent:
             # to model code as RuntimeError(msg).
             if self.gate is not None:
                 self.gate.observe_level(_current_level(ctx.state_path))
+                self.gate.observe_class(ctx.valid_actions)
                 refusal = self.gate.check_action(len(items))
                 if refusal is not None:
                     cell.refusal = refusal

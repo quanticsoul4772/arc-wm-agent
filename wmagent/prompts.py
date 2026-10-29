@@ -265,21 +265,28 @@ before you spend real actions.
 """
 
 
-def gate_addendum_forced(probe_actions: int, mechanisms: str = "base") -> str:
-    """The required-model section, last in the system prompt: interface and rules only, no code."""
+def gate_addendum_forced(probe_actions: int, mechanisms: str = "base", profile: Any = None) -> str:
+    """The required-model section, last in the system prompt: interface and rules only, no code. For the
+    m1a/all arms its numbers are rendered from the gate's `GateProfile` (M3), so the stated rule is the
+    enforced one; without a profile, the gate's default profile for `probe_actions`."""
     if mechanisms == "base":
         return GATE_ADDENDUM_FORCED.replace("{probe_actions}", str(probe_actions))
-    from wmagent.world_model_gate import CHANGE_FLOOR, MIN_INFORMATIVE, PASS_ACCURACY
+    if profile is None:
+        from wmagent.world_model_gate import WorldModelGate
 
-    return (GATE_ADDENDUM_FORCED_M1A.replace("{probe_actions}", str(probe_actions))
-            .replace("{change_floor}", str(CHANGE_FLOOR)).replace("{min_informative}", str(MIN_INFORMATIVE))
-            .replace("{pass_percent}", str(int(PASS_ACCURACY * 100))))
+        profile = WorldModelGate(probe_actions=probe_actions, max_refusals=8).profile
+    return (GATE_ADDENDUM_FORCED_M1A.replace("{probe_actions}", str(profile.probe_actions))
+            .replace("{change_floor}", str(profile.change_floor))
+            .replace("{min_informative}", str(profile.min_informative))
+            .replace("{pass_percent}", str(int(profile.pass_accuracy * 100))))
 
 
-def system_prompt(gate_mode: str | None = None, probe_actions: int = 8, mechanisms: str = "base") -> str:
-    """The system prompt; `gate_mode` is None, "forced" or "optional"; `mechanisms` is the WM_MECHANISMS arm."""
+def system_prompt(gate_mode: str | None = None, probe_actions: int = 8, mechanisms: str = "base",
+                  profile: Any = None) -> str:
+    """The system prompt; `gate_mode` is None, "forced" or "optional"; `mechanisms` is the WM_MECHANISMS arm;
+    `profile` is the gate profile the forced section states (M3)."""
     if gate_mode == "forced":
-        return SYSTEM_PROMPT_BASE + gate_addendum_forced(probe_actions, mechanisms)
+        return SYSTEM_PROMPT_BASE + gate_addendum_forced(probe_actions, mechanisms, profile)
     if gate_mode == "optional":
         return SYSTEM_PROMPT_BASE + GATE_ADDENDUM_OPTIONAL
     return SYSTEM_PROMPT_BASE
