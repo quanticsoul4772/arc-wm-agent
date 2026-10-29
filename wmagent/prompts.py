@@ -251,9 +251,10 @@ Besides your notes, keep a runnable model of the game: a top-level function `pre
 `ascii` argument is a board in the same text form as `current_frame.ascii`, its `action` argument is a move \
 label in the same form as the `.action` of a transition, and it returns the board text you expect after that \
 move. A do-nothing placeholder stands in for it at the start of a game and must be replaced.
-- When a cell that defines `predict` runs, its top-level functions, classes, imports and constants are kept \
-and placed in front of every later cell, even if the cell's `action()` call was refused. Defining `predict` \
-again replaces it. The tool result tells you whether it was accepted.
+- When a cell that defines `predict` finishes without an error other than a refused `action()`, its \
+top-level functions, classes, imports and constants are kept and placed in front of every later cell. A cell \
+that fails with any other error keeps nothing. Defining `predict` again replaces it. The tool result tells you \
+whether it was accepted.
 - After each cell the stored `predict` is backtested on this level's recorded moves that changed more than \
 {change_floor} cells. It is accepted once there are at least {min_informative} such moves and it reproduces \
 at least {pass_percent}% of them, with a tolerance of a few cells.

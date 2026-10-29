@@ -559,13 +559,16 @@ def _without_board_image(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _request_display(item: dict[str, Any]) -> str:
-    """The display string the session gives a requested action (MOUSE(row=r, col=c), clamped 0..63)."""
+    """The display string the session gives a requested action (MOUSE(row=r, col=c), clamped 0..63). A
+    malformed item gets its repr; the session's own validation then answers it as before."""
+    if not isinstance(item, dict):
+        return repr(item)
     label = to_label(str(item.get("action", "")).strip().upper())
     if label != "MOUSE":
         return label
     try:
         row, col = (min(63, max(0, int(item.get(k)))) for k in ("row", "col"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return label
     return f"MOUSE(row={row}, col={col})"
 

@@ -21,8 +21,9 @@ def _events(gate):
 
 
 def _rows(level, outcomes, start=0):
-    """Backtest rows [index, changed, miss, error, level, action]: True = hit, False = miss (5 cells changed)."""
-    return [[start + i, 5, 0 if hit else 5, None, level, "UP"] for i, hit in enumerate(outcomes)]
+    """Backtest rows [index, changed, miss, error, after level, action, before level]: True = hit, False = miss
+    (5 cells changed)."""
+    return [[start + i, 5, 0 if hit else 5, None, level, "UP", level] for i, hit in enumerate(outcomes)]
 
 
 # --- M1b ------------------------------------------------------------------
@@ -179,3 +180,73 @@ def test_agent_carries_the_blocked_note_and_counts_calls(tmp_path):
             texts.append(user["content"][0]["text"] if isinstance(user["content"], list) else user["content"])
     assert "action() is blocked on this level" not in texts[1]  # nothing refused when turn 2 began
     assert gate.blocked() and gate.blocked_calls >= 1
+
+
+# --- review fixes (step 6) ----------------------------------------------------------
+
+
+def _granted(tmp_path):
+    gate = _gate(tmp_path)
+    gate.store = {"predict": PREDICT}
+    gate.confirmed = True
+    gate.observe_level(2)
+    gate.record_actions(4)
+    return gate
+
+
+def test_grant_is_revoked_even_when_every_cell_redefines_predict(tmp_path):
+    gate = _granted(tmp_path)
+    failing = "def predict(ascii, action):\n    return ascii[::-1]\n"
+    rows = _rows(2, [False, False], start=10)
+    gate.after_cell(failing, False, lambda src: rows)  # captured branch, not accepted
+    assert not gate.grant and "grant_revoked" in [e["event"] for e in _events(gate)]
+
+
+def test_an_accepted_model_supersedes_the_grant(tmp_path):
+    gate = _granted(tmp_path)
+    gate.after_cell(PREDICT, False, lambda src: _rows(2, [True, True, True], start=10))
+    assert gate.accepted_at is not None and not gate.grant
+    assert "grant_superseded" in [e["event"] for e in _events(gate)]
+
+
+def test_the_move_that_completed_the_last_level_is_not_a_grant_miss(tmp_path):
+    gate = _granted(tmp_path)
+    boundary = [9, 30, 30, None, 2, "UP", 1]  # before level 1, after level 2: not a move within level 2
+    gate.after_cell("x = 1", False, lambda src: [boundary] + _rows(2, [False], start=10))
+    assert gate.grant and gate.grant_misses == 1
+
+
+def test_probe_line_is_silent_when_the_next_level_will_get_a_grant(tmp_path):
+    gate = _gate(tmp_path)
+    gate.confirmed = True
+    assert gate.probe_line(2) is None
+    gate.confirmed = False
+    assert "probe action(s) left" in gate.probe_line(2)
+
+
+def test_release_valve_restarts_after_an_acceptance(tmp_path):
+    gate = _gate(tmp_path)
+    gate.record_actions(1)
+    gate.check_action(1)
+    for _ in range(5):
+        gate.note_model_call()
+    gate.after_cell(PREDICT, False, lambda src: _rows(1, [True, True, True]))
+    assert gate.accepted_at is not None and gate.blocked_calls == 0
+
+
+def test_base_refusal_text_is_the_original(tmp_path):
+    gate = _gate(tmp_path, mechanisms="base", probe_actions=1)
+    gate.record_actions(1)
+    assert gate.check_action(1) == (
+        "World-model gate: action() is blocked. Define `def predict(ascii, action)` in a python "
+        "cell (top level) that returns the next board ascii for a given board ascii and action "
+        "string; the harness backtests it on recorded transitions and unblocks actions once it "
+        "predicts at least 75% of informative transitions. Refusal 1 of 8.")
+
+
+def test_malformed_action_items_do_not_break_the_progress_path():
+    from wmagent.agent import _request_display
+
+    assert _request_display(["UP"]) == "['UP']"
+    assert _request_display({"action": "MOUSE", "row": float("inf"), "col": 2}) == "MOUSE"
+    assert _request_display({"action": "MOUSE", "row": 70, "col": -3}) == "MOUSE(row=63, col=0)"

@@ -85,7 +85,8 @@ def test_m1a_prompt_states_the_rule_the_gate_enforces():
     assert base == prompts.system_prompt("forced", 8, "base")
     assert f"at least {MIN_INFORMATIVE} such moves" in m1a and f"more than \n{CHANGE_FLOOR}" not in m1a
     assert f"changed more than {CHANGE_FLOOR} cells" in m1a
-    assert "even if the cell's `action()` call was refused" in m1a
+    assert "finishes without an error other than a refused `action()`" in m1a
+    assert "fails with any other error keeps nothing" in m1a
     assert "runs without an error" in base and "runs without an error" not in m1a
     assert prompts.system_prompt("forced", 8, "all") == m1a
     assert prompts.system_prompt("optional", 8, "m1a") == prompts.system_prompt("optional", 8)

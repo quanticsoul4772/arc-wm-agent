@@ -166,7 +166,8 @@ for __i, __t in enumerate(transitions):
     except Exception as __exc:
         __miss = None
         __err = type(__exc).__name__
-    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level, str(__t.action)[:40]])
+    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level, str(__t.action)[:40],
+                         __t.before_frame.level])
 result = __probe_rows
 '''
 
@@ -455,6 +456,8 @@ class WorldModelGate:
         if not self.full:
             return None
         if self.level is not None and level != self.level:
+            if self.confirmed:
+                return None  # the next action() hands this level a grant: no probe limit applies
             remaining = self.profile.probe_actions  # a new level the gate has not seen yet
         elif not self._open_for_probes():
             return None
@@ -486,6 +489,10 @@ class WorldModelGate:
         run_backtest: Callable[[str], list[list[Any]] | None],
     ) -> None:
         self.last_verdict = None
+        if self.grant:
+            # M1c: the carried model is scored after every cell while the grant holds, whatever the cell did
+            # (a cell that redefines predict would otherwise skip the revoke check for the whole level).
+            self._track_grant(run_backtest(self.stored_source()))
         captured = None if errored else extract_definitions(code)
         if captured is not None:
             candidate = dict(self.store)
@@ -511,6 +518,7 @@ class WorldModelGate:
                 self.confirmed = False
                 self.scored_through = verdict["n_transitions"] - 1
                 self.ever_accepted = True
+                self._end_grant_on_accept()
                 self._log("accepted", level=self.level, at_transition=self.accepted_at)
             return
         if self.accepted_at is not None:
@@ -521,8 +529,6 @@ class WorldModelGate:
             # A model carried over from an earlier level: re-judge it on this level.
             rows = run_backtest(self.stored_source())
             verdict = self._judge(rows)
-            if self.grant:
-                self._track_grant(rows)
             if verdict["passed"]:
                 self.accepted_at = verdict["n_transitions"]
                 self.accepted_level = self.level
@@ -531,13 +537,24 @@ class WorldModelGate:
                 self.confirmed = False
                 self.scored_through = verdict["n_transitions"] - 1
                 self.ever_accepted = True
+                self._end_grant_on_accept()
                 self._log("accepted", level=self.level, at_transition=self.accepted_at, carried=True)
+
+    def _end_grant_on_accept(self) -> None:
+        """An accepted model supersedes the grant (prequential scoring takes over), and the release valve
+        counts only calls made after the new acceptance."""
+        if self.grant:
+            self.grant = False
+            self._log("grant_superseded", level=self.level)
+        self.blocked_calls = 0
 
     def _track_grant(self, rows: list[list[Any]] | None) -> None:
         """M1c: two consecutive informative misses of the carried model on this level revoke the grant; only
-        the flag is cleared, so the normal gate resumes from the level's action count."""
+        the flag is cleared, so the normal gate resumes from the level's action count. Only moves played
+        within this level count: not the move that completed the last level, nor a RESET's board."""
         for row in rows or []:
-            if row[0] <= self.grant_scored_through or (len(row) > 4 and row[4] != self.level):
+            within = len(row) > 6 and row[4] == self.level and row[6] == self.level
+            if row[0] <= self.grant_scored_through or not within:
                 continue
             self.grant_scored_through = row[0]
             if row[1] <= self.profile.change_floor:
