@@ -434,6 +434,38 @@ class WorldModelGate:
             self._log("released_blocked_calls", level=self.level, calls=self.blocked_calls,
                       refusals=self.refusals)
 
+    def _open_for_probes(self) -> bool:
+        if not self.profile.forced or self.released or self.grant or self._model_ok():
+            return False
+        return not (self.release_after_accept and self.ever_accepted)
+
+    def batch_allowance(self, requested: int) -> int:
+        """M4c (WM_MECHANISMS=all): a batch longer than the probe actions left runs truncated to them instead
+        of being refused whole, which would cost a model call; other arms keep the old cap."""
+        if not self.full or not self._open_for_probes():
+            return requested
+        remaining = self.profile.probe_actions - self.level_actions
+        if 0 < remaining < requested:
+            self._log("batch_truncated", level=self.level, requested=requested, allowed=remaining)
+            return remaining
+        return requested
+
+    def probe_line(self, level: int | None) -> str | None:
+        """M4c: the probe actions left on the board's level, for the user prompt (WM_MECHANISMS=all)."""
+        if not self.full:
+            return None
+        if self.level is not None and level != self.level:
+            remaining = self.profile.probe_actions  # a new level the gate has not seen yet
+        elif not self._open_for_probes():
+            return None
+        else:
+            remaining = self.profile.probe_actions - self.level_actions
+        if remaining <= 0:
+            return None
+        return (f"World-model gate: {remaining} probe action(s) left on this level before your predict must be "
+                "accepted. Send them together in one action([...]) list of moves that change the board, then "
+                "check the result.")
+
     def record_actions(self, executed: int) -> None:
         self.level_actions += max(0, executed)
 

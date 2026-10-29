@@ -17,6 +17,7 @@ from typing import Any
 import requests
 
 from wmagent import prompts
+from wmagent.progress import ProgressMonitor
 from wmagent.world_model_gate import BACKTEST_DRIVER, WorldModelGate, mechanisms_from_env
 
 # ---------------------------------------------------------------------------
@@ -543,6 +544,32 @@ def _elide_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+BOARD_IMAGE_OMITTED = "<board image omitted>"
+
+
+def _without_board_image(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return message
+    if not any(part.get("type") == "image_url" for part in content):
+        return message
+    parts = [{"type": "text", "text": BOARD_IMAGE_OMITTED} if part.get("type") == "image_url" else part
+             for part in content]
+    return {**message, "content": parts}
+
+
+def _request_display(item: dict[str, Any]) -> str:
+    """The display string the session gives a requested action (MOUSE(row=r, col=c), clamped 0..63)."""
+    label = to_label(str(item.get("action", "")).strip().upper())
+    if label != "MOUSE":
+        return label
+    try:
+        row, col = (min(63, max(0, int(item.get(k)))) for k in ("row", "col"))
+    except (TypeError, ValueError):
+        return label
+    return f"MOUSE(row={row}, col={col})"
+
+
 def _default_sandbox() -> tuple[Callable[..., dict[str, Any]], type[Exception]]:
     from wmagent.sandbox import ActionRefused, run_sandboxed_python
 
@@ -575,6 +602,7 @@ class ToolAgent:
             self.gate_mode, self.gate.probe_actions if self.gate is not None else 8, self.config.mechanisms,
             self.gate.profile if self.gate is not None else None)
         self._state_path: Path | None = None
+        self.progress: ProgressMonitor | None = None
         self._new_game()
 
     @property
@@ -683,6 +711,8 @@ class ToolAgent:
             self._new_game()
             if self.gate is not None:
                 self.gate.reset(state_path)
+            # M2 / M4d: the no-progress breaker and level memory (WM_MECHANISMS=all only)
+            self.progress = ProgressMonitor.for_state(state_path) if self.config.mechanisms == "all" else None
         saved_history = list(self.history)
         self._saved_history = saved_history
         try:
@@ -717,7 +747,8 @@ class ToolAgent:
             level = max(level, int(self.last_summary.get("level") or 1))
         seen = [int((entry.get("frame") or {}).get("level") or 1) for entry in runtime.get("history") or []]
         next_step = max(int(frame.get("step") or 0), action_count) + 1
-        if self._continuing:
+        continuing = self._continuing
+        if continuing:
             # M2c: the previous turn yielded without playing and its history was kept, so the full prompt and
             # turn guide would only be re-sent; a short note keeps the open turn going.
             text = prompts.continuation_prompt(step=next_step, level=level, valid_actions=valid_actions)
@@ -731,6 +762,13 @@ class ToolAgent:
         blocked = self.gate.blocked_note(int(frame.get("level") or 1)) if self.gate is not None else None
         if blocked:
             text += "\n\n" + blocked  # M1b: the deny evidence is carried while the level stays blocked
+        board_level = int(frame.get("level") or 1)
+        extra = [
+            self.gate.probe_line(board_level) if self.gate is not None else None,  # M4c
+            self.progress.take_stuck_line() if self.progress is not None else None,  # M2b
+            self.progress.memory_block() if self.progress is not None and not continuing else None,  # M4d
+        ]
+        text += "".join("\n\n" + line for line in extra if line)
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         if self.config.multimodal_context == "current_grid" and frame.get("grid"):
             url = grid_png_data_url(frame["grid"], self.config.multimodal_upscale)
@@ -856,6 +894,10 @@ class ToolAgent:
                      persist: bool = True):
         if persist:
             self.history = persistable_history(messages, self.config.budget)
+            if self.config.mechanisms == "all":
+                # M4b: a user message loses its board image when it is kept, once; the live request carries the
+                # current board, and a message never changes after it is kept.
+                self.history = [_without_board_image(m) for m in self.history]
         else:
             self.history = list(self._saved_history)
         if ctx.results:
@@ -908,15 +950,37 @@ class ToolAgent:
             # only before the check, so a level completed by this batch is still scored on the old
             # level by after_cell. A refusal raises out of the handler and the sandbox surfaces it
             # to model code as RuntimeError(msg).
+            truncated = 0
             if self.gate is not None:
                 self.gate.observe_level(_current_level(ctx.state_path))
                 self.gate.observe_class(ctx.valid_actions)
+                allowed = self.gate.batch_allowance(len(items))  # M4c: truncate instead of refusing (all arm)
+                truncated, items = len(items) - allowed, items[:allowed]
                 refusal = self.gate.check_action(len(items))
                 if refusal is not None:
                     cell.refusal = refusal
                     raise refused(refusal)
+            shadow_hits: list[int] = []
+            if self.progress is not None:
+                runtime = load_runtime_state(ctx.state_path)
+                history = runtime.get("history") or []
+                if history and history[-1].get("action") == "RESET":
+                    self.progress.no_effect.clear()  # the harness restarted the level after GAME_OVER
+                current = runtime.get("current_frame") or {}
+                shadow_hits = self.progress.shadow_check(int(current.get("level") or 1), current.get("grid"),
+                                                         [_request_display(i) for i in items])
             payload = ctx.step_env({"actions": items})
             result = compact_result(payload)
+            if truncated:
+                result["truncated_by_gate"] = (f"only the first {len(items)} action(s) ran: the probe actions "
+                                               f"left on this level; {truncated} were dropped")
+            if self.progress is not None and executed_count_of(payload) > 0:
+                done = executed_count_of(payload)
+                frames = [entry.get("frame") or {} for entry in
+                          (load_runtime_state(ctx.state_path).get("history") or [])[-(done + 1):]]
+                displays = list(payload.get("executed_actions") or [payload.get("action_display")])[:done]
+                if len(frames) == len(displays) + 1:
+                    self.progress.record(frames, displays, shadow_hits)
             if self.gate is not None:
                 # a failed call (error payload, no executed_count) counts 1, as in the original
                 self.gate.record_actions(int(result.get("executed_count", 1) or 0))
@@ -949,6 +1013,13 @@ class ToolAgent:
             self.gate.after_cell(code, had_error and not refusal_only, lambda src: self._backtest(src, ctx))
             if refusal_only:
                 gate_note = self.gate.verdict_note()
+            if self.progress is not None:
+                if cell.refusal is not None:
+                    self.progress.record_refusal(captured=self.gate.last_verdict is not None)
+                elif self.gate.last_verdict is not None:
+                    self.progress.record_capture()
+        if self.progress is not None:
+            self.progress.record_cell(code)
         return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens, gate_note)
 
     def _state(self, ctx: _TurnContext) -> dict[str, Any]:
