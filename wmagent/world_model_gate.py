@@ -166,7 +166,7 @@ for __i, __t in enumerate(transitions):
     except Exception as __exc:
         __miss = None
         __err = type(__exc).__name__
-    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level])
+    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level, str(__t.action)[:40]])
 result = __probe_rows
 '''
 
@@ -195,6 +195,15 @@ class WorldModelGate:
     # Outcome of the last after_cell: None when no predict was captured, else the verdict dict
     # (with "passed"); read by the agent to tell the model what happened to its predict.
     last_verdict: dict[str, Any] | None = None
+    # WM_MECHANISMS=all (Plan C step 4a): the level's last judged verdict (M1b evidence), the carried
+    # probation grant (M1c) and the model calls spent on a blocked level (M1d).
+    level_verdict: dict[str, Any] | None = None
+    grant: bool = False
+    grant_misses: int = 0
+    grant_scored_through: int = -1
+    blocked_calls: int = 0
+    deny_followup: dict[str, Any] | None = None
+    submitted_predict: str | None = None
 
     @classmethod
     def from_env(cls) -> WorldModelGate | None:
@@ -212,6 +221,11 @@ class WorldModelGate:
     def evaluate_on_deny(self) -> bool:
         return self.mechanisms != "base"
 
+    @property
+    def full(self) -> bool:
+        """WM_MECHANISMS=all: deny evidence (M1b), carried grant (M1c), release valve (M1d)."""
+        return self.mechanisms == "all"
+
     def reset(self, state_path: Path) -> None:
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
         self.log_path = state_path.with_name(f"{stem}_wm_gate.jsonl")
@@ -228,6 +242,13 @@ class WorldModelGate:
         self.ever_accepted = False
         self.confirmed = False
         self.last_verdict = None
+        self.level_verdict = None
+        self.grant = False
+        self.grant_misses = 0
+        self.grant_scored_through = -1
+        self.blocked_calls = 0
+        self.deny_followup = None
+        self.submitted_predict = None
         # The manifest: what this run actually enforces, so each arm is confirmed from its logs.
         self._log(
             "session_start",
@@ -284,6 +305,15 @@ class WorldModelGate:
             return
         if self.level is not None:
             self._log("level_change", from_level=self.level, to_level=level)
+        # M1c: a model confirmed on held-out moves of the level just finished carries a probation grant
+        # into this one level; it is renewed only by a new confirmation here.
+        self.grant = self.full and self.level is not None and self.confirmed
+        self.grant_misses = 0
+        if self.grant:
+            self._log("grant", from_level=self.level, to_level=level)
+        self.level_verdict = None
+        self.blocked_calls = 0
+        self.deny_followup = None
         self.level = level
         self.level_actions = 0
         self.refusals = 0
@@ -326,7 +356,7 @@ class WorldModelGate:
         profile = self.profile
         if not profile.forced:
             return None
-        if self.released or self._model_ok():
+        if self.released or self._model_ok() or self.grant:
             return None
         if self.release_after_accept and self.ever_accepted:
             return None
@@ -347,13 +377,62 @@ class WorldModelGate:
             return None
         self._log("refused", level=self.level, refusal=self.refusals, requested=requested,
                   shadow=self._shadow(requested))
+        if self.full:
+            # compared with the predict the model last submitted, not the stored (accepted) one
+            self.deny_followup = {"predict": self.submitted_predict,
+                                  "accuracy": (self.level_verdict or {}).get("accuracy")}
         return (
             "World-model gate: action() is blocked. Define `def predict(ascii, action)` in a python "
             "cell (top level) that returns the next board ascii for a given board ascii and action "
             "string; the harness backtests it on recorded transitions and unblocks actions once it "
             f"predicts at least {int(profile.pass_accuracy * 100)}% of informative transitions. "
             f"Refusal {self.refusals} of {self.max_refusals}."
-        )
+        ) + self._deny_evidence()
+
+    def evidence_line(self) -> str:
+        """M1b: the level's last verdict in one short line (250 characters at most)."""
+        p = self.profile
+        rule = f"needs {p.min_informative}+ moves changing >{p.change_floor} cells, {int(p.pass_accuracy * 100)}% matched"
+        v = self.level_verdict
+        if v is None:
+            return f"No predict has been judged on this level yet ({rule})."
+        if v.get("reason") == "backtest_failed":
+            return f"Your last predict's backtest failed to run ({rule})."
+        line = (f"Your last predict matched {round(v['accuracy'] * v['informative'])} of {v['informative']} "
+                f"informative moves ({rule}).")
+        miss = v.get("first_miss")
+        if miss:
+            off = "raised an error" if miss["miss"] is None else f"was off by {miss['miss']} cells"
+            line += f" First miss: {miss['action']} changed {miss['changed']} cells and predict {off}."
+        return line[:250]
+
+    def _deny_evidence(self) -> str:
+        return (" " + self.evidence_line()) if self.full else ""
+
+    def blocked(self) -> bool:
+        """The level is blocked: it has refused an action and would still refuse the next one."""
+        if not self.profile.forced or self.refusals == 0 or self.released or self.grant or self._model_ok():
+            return False
+        return not (self.release_after_accept and self.ever_accepted)
+
+    def blocked_note(self, level: int | None) -> str | None:
+        """M1b re-injection: the evidence line for the next user prompt while the level is blocked. `level` is
+        the board's level now; the gate sees a new level only at the next action() call, so a stale level
+        means the block it remembers is over."""
+        if not self.full or level != self.level or not self.blocked():
+            return None
+        return "World-model gate: action() is blocked on this level. " + self.evidence_line()
+
+    def note_model_call(self) -> None:
+        """M1d release valve: after `blocked_call_release` model calls on a blocked level with no accepted
+        model, the level is released. It applies alongside the refusal cap; whichever comes first releases."""
+        if not self.full or not self.blocked():
+            return
+        self.blocked_calls += 1
+        if self.blocked_calls >= self.profile.blocked_call_release:
+            self.released = True
+            self._log("released_blocked_calls", level=self.level, calls=self.blocked_calls,
+                      refusals=self.refusals)
 
     def record_actions(self, executed: int) -> None:
         self.level_actions += max(0, executed)
@@ -382,7 +461,15 @@ class WorldModelGate:
             rows = run_backtest("\n\n".join(candidate.values()))
             verdict = self._judge(rows)
             self.last_verdict = verdict
+            self.level_verdict = verdict
             self._log("captured", level=self.level, names=sorted(captured), **verdict)
+            if self.deny_followup is not None:
+                before = self.deny_followup
+                self._log("deny_followup", level=self.level,
+                          predict_changed=captured.get("predict") != before["predict"],
+                          accuracy_before=before["accuracy"], accuracy_after=verdict.get("accuracy"))
+                self.deny_followup = None
+            self.submitted_predict = captured.get("predict")
             if verdict["passed"]:
                 self.store = candidate
                 self.accepted_at = verdict["n_transitions"]
@@ -402,6 +489,8 @@ class WorldModelGate:
             # A model carried over from an earlier level: re-judge it on this level.
             rows = run_backtest(self.stored_source())
             verdict = self._judge(rows)
+            if self.grant:
+                self._track_grant(rows)
             if verdict["passed"]:
                 self.accepted_at = verdict["n_transitions"]
                 self.accepted_level = self.level
@@ -412,6 +501,21 @@ class WorldModelGate:
                 self.ever_accepted = True
                 self._log("accepted", level=self.level, at_transition=self.accepted_at, carried=True)
 
+    def _track_grant(self, rows: list[list[Any]] | None) -> None:
+        """M1c: two consecutive informative misses of the carried model on this level revoke the grant; only
+        the flag is cleared, so the normal gate resumes from the level's action count."""
+        for row in rows or []:
+            if row[0] <= self.grant_scored_through or (len(row) > 4 and row[4] != self.level):
+                continue
+            self.grant_scored_through = row[0]
+            if row[1] <= self.profile.change_floor:
+                continue
+            self.grant_misses = 0 if _is_hit(row[1], row[2]) else self.grant_misses + 1
+            if self.grant_misses >= 2:
+                self.grant = False
+                self._log("grant_revoked", level=self.level, transition=row[0])
+                return
+
     def _judge(self, rows: list[list[Any]] | None) -> dict[str, Any]:
         if rows is None:
             return {"passed": False, "reason": "backtest_failed", "n_transitions": 0}
@@ -419,6 +523,9 @@ class WorldModelGate:
         profile = self.profile
         informative = [r for r in scoped if r[1] > profile.change_floor]
         hits = [r for r in informative if _is_hit(r[1], r[2])]
+        misses = [r for r in informative if not _is_hit(r[1], r[2])]
+        first_miss = ({"transition": misses[0][0], "action": misses[0][5] if len(misses[0]) > 5 else "?",
+                       "changed": misses[0][1], "miss": misses[0][2]} if misses else None)
         accuracy = len(hits) / len(informative) if informative else 0.0
         n_transitions = (max(r[0] for r in rows) + 1) if rows else 0
         return {
@@ -427,6 +534,7 @@ class WorldModelGate:
             "informative": len(informative),
             "errors": sum(1 for r in rows if r[3]),
             "n_transitions": n_transitions,
+            "first_miss": first_miss,
         }
 
     def _score_prequential(self, rows: list[list[Any]] | None) -> None:

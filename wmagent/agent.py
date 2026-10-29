@@ -728,6 +728,9 @@ class ToolAgent:
                 previous_summary=self.last_summary,
             )
         self._continuing = False
+        blocked = self.gate.blocked_note(int(frame.get("level") or 1)) if self.gate is not None else None
+        if blocked:
+            text += "\n\n" + blocked  # M1b: the deny evidence is carried while the level stays blocked
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         if self.config.multimodal_context == "current_grid" and frame.get("grid"):
             url = grid_png_data_url(frame["grid"], self.config.multimodal_upscale)
@@ -766,6 +769,8 @@ class ToolAgent:
             request_started = time.time()
             reply, messages = self._request_with_trim(messages, timeout)
             requests_made += 1
+            if self.gate is not None:
+                self.gate.note_model_call()  # M1d release valve (WM_MECHANISMS=all only)
             generated = self._account(reply["usage"])
             self._log_request(state_path, step, requests_made, request_started, before_trim, sent, messages, reply)
             message = reply["message"]
