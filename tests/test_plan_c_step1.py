@@ -118,3 +118,22 @@ def test_kaggle_env_carries_wm_mechanisms():
     assert agent_env(parse_args(["--out", "o", "--label", "t", "--wm-mechanisms", "all"]))["WM_MECHANISMS"] == "all"
     with pytest.raises(SystemExit):
         parse_args(["--out", "o", "--label", "t", "--wm-mechanisms", "x"])
+
+
+def test_a_push_without_an_arm_stops_before_building(tmp_path, monkeypatch):
+    from wmagent.kaggle import build as build_mod
+
+    def no_build(a):
+        raise AssertionError("must stop before building")
+
+    monkeypatch.setattr(build_mod, "build", no_build)
+    with pytest.raises(SystemExit, match="--wm-mechanisms is required"):
+        build_mod.main(["--out", str(tmp_path), "--label", "t"])
+
+
+def test_a_dry_run_without_an_arm_writes_base(tmp_path, capsys):
+    from wmagent.kaggle import build as build_mod
+
+    build_mod.main(["--out", str(tmp_path), "--label", "t", "--dry-run"])
+    env = json.loads((tmp_path / "kaggle" / "source-dataset" / "agent_env.json").read_text())
+    assert env["WM_MECHANISMS"] == "base" and "WM_MECHANISMS=base" in capsys.readouterr().out
