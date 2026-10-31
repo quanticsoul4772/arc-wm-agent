@@ -65,7 +65,7 @@ if __name__ != "__main__":
     # script under -I -S) must not import the session, which needs site-packages.
     # An action handler raises ActionRefused to reject an `action()` request; the
     # model's code sees a RuntimeError carrying the same message.
-    from wmagent.session import ActionRefused
+    from wmagent.session import ActionRefused, HostFailure
 
 __all__ = ["ALLOWED_MODULES", "ActionRefused", "run_sandboxed_python"]
 
@@ -158,6 +158,7 @@ def run_sandboxed_python(
     from wmagent.segmentation import ASCII_ALPHABET
 
     action_results: list[Any] = []
+    handler_errors_printed = [0]
     owned_dir = None
     if sandbox_cwd is None:
         owned_dir = tempfile.mkdtemp(prefix="wm_sandbox_")
@@ -170,11 +171,12 @@ def run_sandboxed_python(
         "color_chars": color_chars or ASCII_ALPHABET,
     }
     deadline = time.monotonic() + float(timeout_seconds)
+    errlog = tempfile.TemporaryFile()  # noqa: SIM115 - the child's stderr, read if it dies; closed in the finally
     proc = subprocess.Popen(
         [sys.executable, "-I", "-S", "-u", str(Path(__file__).resolve())],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=errlog,
         cwd=str(sandbox_cwd),
         env=_child_env(),
         start_new_session=True,
@@ -188,29 +190,43 @@ def run_sandboxed_python(
     def failure(error: str) -> dict[str, Any]:
         return {"error": error, "stdout": "", "action_results": action_results}
 
+    def exited() -> dict[str, Any]:
+        """The child died: say how (exit code or signal, end of its stderr) instead of one message for all."""
+        try:
+            code = proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            code = None
+        errlog.seek(0)
+        tail = errlog.read()[-300:].decode("utf-8", "replace").strip()
+        detail = f"Sandbox process exited unexpectedly (exit code {code})."
+        if tail:
+            detail += f" stderr: {tail}"
+        print(f"[sandbox] {detail}", flush=True)
+        return failure(detail)
+
     try:
         try:
             send(request)
         except (BrokenPipeError, OSError):
-            return failure("Sandbox process exited unexpectedly.")
+            return exited()
         while True:
             try:
                 line = channel.read_line(deadline)
             except TimeoutError:
                 return failure(f"Tool timed out after {_timeout_label(timeout_seconds)}")
             if line is None:
-                return failure("Sandbox process exited unexpectedly.")
+                return exited()
             try:
                 message = json.loads(line.decode("utf-8"))
                 kind = message["type"]
             except (ValueError, KeyError, TypeError):
                 return failure("Sandbox returned an invalid response.")
             if kind == "action":
-                reply = _handle_action(action_handler, message.get("actions"), action_results)
+                reply = _handle_action(action_handler, message.get("actions"), action_results, handler_errors_printed)
                 try:
                     send(reply)
                 except (BrokenPipeError, OSError):
-                    return failure("Sandbox process exited unexpectedly.")
+                    return exited()
                 continue
             if kind == "final":
                 return {
@@ -228,6 +244,7 @@ def run_sandboxed_python(
     finally:
         _kill_group(proc)
         channel.close()
+        errlog.close()
         for stream in (proc.stdin, proc.stdout):
             try:
                 stream.close()
@@ -237,10 +254,14 @@ def run_sandboxed_python(
             shutil.rmtree(owned_dir, ignore_errors=True)
 
 
+HANDLER_ERRORS_PRINTED_PER_CELL = 3
+
+
 def _handle_action(
     handler: Callable[[list[dict[str, Any]]], dict[str, Any]] | None,
     actions: Any,
     action_results: list[Any],
+    printed: list[int],
 ) -> dict[str, Any]:
     if handler is None:
         return {"type": "action_error", "error": "action() is not available in this sandbox."}
@@ -248,7 +269,18 @@ def _handle_action(
         reply = handler(actions)
     except ActionRefused as exc:
         return {"type": "action_error", "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - the handler's failure is reported to the model's code, not raised here
+    except HostFailure:
+        raise  # the host broke after the action ran: the game crashes (session.HostFailure), the model is not told
+    except Exception as exc:  # noqa: BLE001 - reported to the model's code (bad model input lands here too)
+        # ...and printed with its traceback, so a host bug behind it does not pass as the model's mistake; a cell
+        # that loops on the same failing call prints the first few only
+        printed[0] += 1
+        if printed[0] <= HANDLER_ERRORS_PRINTED_PER_CELL:
+            import traceback
+
+            print(f"[sandbox] action handler raised (reported to the model): {type(exc).__name__}: {exc}",
+                  flush=True)
+            traceback.print_exc(file=sys.stdout)
         return {"type": "action_error", "error": f"{type(exc).__name__}: {exc}"}
     reply = reply if isinstance(reply, dict) else {}
     action_result = reply.get("action_result")

@@ -33,6 +33,7 @@ Every decision is appended to <run_stem>_wm_gate.jsonl next to the run's state f
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import os
 import re
@@ -41,6 +42,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from wmagent.game_class import GateProfile, classify, profile_for, shadow_profiles
 
 PREDICT_PATTERN = re.compile(r"^def predict\(", re.MULTILINE)
 
@@ -52,6 +55,27 @@ PREQUENTIAL_WINDOW = 10
 PREQUENTIAL_FLOOR = 0.5
 HELDOUT_N = 3
 HELDOUT_PASS_HITS = 3
+
+# WM_MECHANISMS (Plan C arms): "base" is the harness as it was, "m1a" adds capture-on-deny and the
+# stated acceptance rule, "all" adds every Plan C mechanism, "all-nocont" is "all" without the yield-continuation
+# prompt (M2c; arm C slowed down on it, C201), "all-nocont-fb" is "all-nocont" plus the verdict after every cell
+# that defines predict, with the backtest error and a wrong board shape spelled out, "all-nocont-fbx" is
+# "all-nocont-fb" plus four fixes from the C200 logs: a rejected action costs no probe, a release is announced,
+# traceback line numbers point into the model's own cell, and capture keeps only self-contained constants;
+# "all-nocont-fbx-img" is "all-nocont-fbx" with past board images kept in the history (no M4b elision: C2 and D
+# generated ~40% more tokens per turn than A once their history held earlier turns without images, C201).
+# Read only in from_env / AgentConfig.from_env.
+MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
+FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
+# Arms whose kept user messages lose their board image (M4b).
+ELIDE_IMAGE_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
+
+
+def mechanisms_from_env() -> str:
+    value = os.environ.get("WM_MECHANISMS", "").strip().lower() or "base"
+    if value not in MECHANISMS:
+        raise ValueError(f"WM_MECHANISMS must be one of {MECHANISMS}, got {value!r}")
+    return value
 
 SKELETON_PREDICT = '''def predict(ascii, action):
     # TODO: replace with the game's dynamics: return the board after `action`.
@@ -74,15 +98,58 @@ SIMULATE_HELPER = '''def simulate(actions, ascii=None):
 
 
 def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
     try:
-        return int(os.environ.get(name, "").strip() or default)
+        return int(raw or default)
     except ValueError:
-        return default
+        raise ValueError(f"{name}={raw!r} is not an integer") from None
 
 
-def extract_definitions(code: str) -> dict[str, str] | None:
+def _env_flag(name: str) -> bool:
+    """Unset, "" or "0" is off, "1" is on; anything else is an error (PROBE_ENFORCE=true used to turn the gate
+    off without a word)."""
+    raw = os.environ.get(name, "").strip()
+    if raw in ("", "0", "1"):
+        return raw == "1"
+    raise ValueError(f"{name}={raw!r} must be 1 or 0")
+
+
+def _bound_names(node: ast.AST) -> set[str]:
+    """Names a top-level import, def, class or assignment binds."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    if isinstance(node, ast.Assign):
+        return {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return set()
+
+
+def _free_names(value: ast.AST) -> set[str]:
+    """Names an expression reads that it does not bind itself (comprehension variables are bound)."""
+    loads = {n.id for n in ast.walk(value) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    stores = {n.id for n in ast.walk(value) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    return loads - stores
+
+
+def stored_names(store: dict[str, str]) -> set[str]:
+    """Names the stored definitions bind (they run above every backtest)."""
+    names: set[str] = set()
+    for segment in store.values():
+        try:
+            names |= set().union(*(_bound_names(n) for n in ast.parse(segment).body))
+        except SyntaxError:
+            continue
+    return names
+
+
+def extract_definitions(code: str, self_contained: bool = False, known: set[str] | frozenset[str] = frozenset()
+                        ) -> dict[str, str] | None:
     """Top-level imports, defs, classes and constant assignments from a cell
-    that defines predict; None if the cell does not define predict."""
+    that defines predict; None if the cell does not define predict. With `self_contained` (all-nocont-fbx) a
+    constant is kept only if every name it reads is a builtin, in `known` (the stored definitions) or bound
+    earlier in the captured part of the cell: a constant built from lines the capture drops would make the
+    whole backtest fail with a NameError (all 29 backtest failures in C200's arms)."""
     if not PREDICT_PATTERN.search(code):
         return None
     try:
@@ -90,18 +157,24 @@ def extract_definitions(code: str) -> dict[str, str] | None:
     except SyntaxError:
         return None
     definitions: dict[str, str] = {}
+    bound = set(known) | set(dir(builtins))
     for node in tree.body:
         segment = ast.get_source_segment(code, node)
         if segment is None:
             continue
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
             definitions[node.name] = segment
+            bound |= _bound_names(node)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             definitions[f"import:{segment}"] = segment
+            bound |= _bound_names(node)
         elif (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)
               and not any(isinstance(n, ast.Call) for n in ast.walk(node.value))):
+            if self_contained and not _free_names(node.value) <= bound:
+                continue
             for target in node.targets:
                 definitions[f"const:{target.id}"] = segment
+            bound |= _bound_names(node)
     return definitions if "predict" in definitions else None
 
 
@@ -124,6 +197,10 @@ def _is_hit(changed: int, miss: int | None) -> bool:
     return miss <= max(MISS_TOLERANCE, 0.05 * changed) and miss < changed
 
 
+# all-nocont-fb: what a failed backtest's verdict adds, so the model can make its captured definitions run.
+BACKTEST_SCOPE = ("The backtest runs only the top-level imports, defs, classes and constant assignments of the cells "
+                  "that defined predict, so they cannot use names defined in other cells.")
+
 # Runs inside the restricted sandbox after the stored definitions.
 BACKTEST_DRIVER = r'''
 def __probe_mismatch(predicted, actual):
@@ -134,6 +211,13 @@ def __probe_mismatch(predicted, actual):
         count += abs(len(p_row) - len(a_row))
         count += sum(1 for p, a in zip(p_row, a_row) if p != a)
     return count
+
+def __probe_shape(predicted, actual):
+    p_rows = [row.strip() for row in str(predicted).strip().splitlines()]
+    a_rows = [row.strip() for row in str(actual).strip().splitlines()]
+    p_shape = [len(p_rows), max([len(r) for r in p_rows] or [0])]
+    a_shape = [len(a_rows), max([len(r) for r in a_rows] or [0])]
+    return None if p_shape == a_shape else p_shape + a_shape
 
 __probe_rows = []
 for __i, __t in enumerate(transitions):
@@ -149,11 +233,14 @@ for __i, __t in enumerate(transitions):
     try:
         __pred = predict(__t.before_frame.ascii, __t.action)
         __miss = __probe_mismatch(__pred, __t.after_frame.ascii)
+        __shape = __probe_shape(__pred, __t.after_frame.ascii)
         __err = None
     except Exception as __exc:
         __miss = None
+        __shape = None
         __err = type(__exc).__name__
-    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level])
+    __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level, str(__t.action)[:40],
+                         __t.before_frame.level, __shape])
 result = __probe_rows
 '''
 
@@ -177,17 +264,58 @@ class WorldModelGate:
     ever_accepted: bool = False
     optional: bool = False
     confirmed: bool = False
+    mechanisms: str = "base"
+    game_class: str | None = None
+    # The agent's per-game request counter while a reply's tool cell runs: each log row carries it, so it joins
+    # the row of <stem>_requests.jsonl (and the prompt snapshot) of the request whose reply caused it.
+    request: int | None = None
+    # Outcome of the last after_cell: None when no predict was captured, else the verdict dict
+    # (with "passed"); read by the agent to tell the model what happened to its predict.
+    last_verdict: dict[str, Any] | None = None
+    # WM_MECHANISMS=all (Plan C step 4a): the level's last judged verdict (M1b evidence), the carried
+    # probation grant (M1c) and the model calls spent on a blocked level (M1d).
+    level_verdict: dict[str, Any] | None = None
+    grant: bool = False
+    grant_misses: int = 0
+    grant_scored_through: int = -1
+    blocked_calls: int = 0
+    deny_followup: dict[str, Any] | None = None
+    submitted_predict: str | None = None
+    # all-nocont-fb: the last line of the last backtest's error, for the verdict the model is shown
+    backtest_error: str | None = None
 
     @classmethod
     def from_env(cls) -> WorldModelGate | None:
-        if os.environ.get("PROBE_ENFORCE", "").strip() != "1":
+        if not _env_flag("PROBE_ENFORCE"):
             return None
         return cls(
             probe_actions=_env_int("PROBE_ACTIONS", 30),
             max_refusals=_env_int("PROBE_MAX_REFUSALS", 8),
-            release_after_accept=os.environ.get("PROBE_RELEASE_AFTER_ACCEPT", "").strip() == "1",
-            optional=os.environ.get("PROBE_OPTIONAL", "").strip() == "1",
+            release_after_accept=_env_flag("PROBE_RELEASE_AFTER_ACCEPT"),
+            optional=_env_flag("PROBE_OPTIONAL"),
+            mechanisms=mechanisms_from_env(),
         )
+
+    @property
+    def evaluate_on_deny(self) -> bool:
+        return self.mechanisms != "base"
+
+    @property
+    def capture_feedback(self) -> bool:
+        """WM_MECHANISMS=all-nocont-fb / fbx: the verdict after every cell that defines predict, with the
+        backtest error and a wrong board shape spelled out."""
+        return self.mechanisms in ("all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
+
+    @property
+    def fixes(self) -> bool:
+        """WM_MECHANISMS=all-nocont-fbx: rejected actions cost no probe, releases are announced, traceback lines
+        point into the model's cell, capture keeps only self-contained constants."""
+        return self.mechanisms in ("all-nocont-fbx", "all-nocont-fbx-img")
+
+    @property
+    def full(self) -> bool:
+        """WM_MECHANISMS=all / all-nocont: deny evidence (M1b), carried grant (M1c), release valve (M1d)."""
+        return self.mechanisms in FULL_MECHANISMS
 
     def reset(self, state_path: Path) -> None:
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
@@ -204,23 +332,76 @@ class WorldModelGate:
         self.heldout = []
         self.ever_accepted = False
         self.confirmed = False
+        self.last_verdict = None
+        self.level_verdict = None
+        self.grant = False
+        self.grant_misses = 0
+        self.grant_scored_through = -1
+        self.blocked_calls = 0
+        self.deny_followup = None
+        self.submitted_predict = None
+        # The manifest: what this run actually enforces, so each arm is confirmed from its logs.
         self._log(
             "session_start",
             probe_actions=self.probe_actions,
             max_refusals=self.max_refusals,
             release_after_accept=self.release_after_accept,
             optional=self.optional,
+            mechanisms=self.mechanisms,
+            change_floor=self.base_profile.change_floor,
+            min_informative=self.base_profile.min_informative,
+            pass_accuracy=self.base_profile.pass_accuracy,
         )
 
     def _log(self, event: str, **fields: Any) -> None:
         if self.log_path is None:
             return
-        record = {"t": time.time(), "event": event, **fields}
+        record = {"t": time.time(), "event": event, "game_class": self.game_class, **fields}
+        if self.request is not None:
+            record["request"] = self.request
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 
+    def verdict_note(self) -> str | None:
+        """What happened to the predict captured by the last cell, for a cell whose action() was refused:
+        the refusal text was written before the backtest ran, so it says nothing about this predict."""
+        verdict = self.last_verdict
+        if verdict is None:
+            return None
+        if verdict["passed"]:
+            return "World-model gate: your predict was accepted on this level; action() is unblocked."
+        if verdict.get("reason") == "backtest_failed":
+            if self.capture_feedback:
+                return ("World-model gate: your predict was captured but its backtest failed to run: "
+                        f"{verdict.get('error') or 'no error text'}. {BACKTEST_SCOPE}")
+            return "World-model gate: your predict was captured but its backtest failed to run."
+        note = (
+            f"World-model gate: your predict was captured but not accepted: it matched "
+            f"{round(verdict['accuracy'] * verdict['informative'])} of {verdict['informative']} informative moves "
+            f"(needs at least {self.profile.min_informative} moves that change more than "
+            f"{self.profile.change_floor} cells, and at least {int(self.profile.pass_accuracy * 100)}% of them matched)."
+        )
+        if self.capture_feedback and verdict.get("first_miss"):
+            note += " " + self._miss_sentence(verdict["first_miss"])
+        return note
+
+    @staticmethod
+    def _miss_sentence(miss: dict[str, Any]) -> str:
+        """all-nocont-fb: the first missed move, with a wrong board shape named as such."""
+        shape = miss.get("shape")
+        if miss["miss"] is None:
+            off = "raised an error"
+        elif shape:
+            off = (f"returned {shape[0]} line(s) up to {shape[1]} characters wide; the board is {shape[2]} lines "
+                   f"of {shape[3]}")
+        else:
+            off = f"was off by {miss['miss']} cells"
+        return f"First miss: {miss['action']} changed {miss['changed']} cells and predict {off}."
+
     def note_backtest_error(self, error: str) -> None:
         self._log("backtest_error", level=self.level, error=str(error)[:300])
+        lines = [line.strip() for line in str(error).strip().splitlines() if line.strip()]
+        self.backtest_error = lines[-1][:200] if lines else None
 
     def stored_source(self) -> str:
         return "\n\n".join(self.store.values())
@@ -238,6 +419,15 @@ class WorldModelGate:
             return
         if self.level is not None:
             self._log("level_change", from_level=self.level, to_level=level)
+        # M1c: a model confirmed on held-out moves of the level just finished carries a probation grant
+        # into this one level; it is renewed only by a new confirmation here.
+        self.grant = self.full and self.level is not None and self.confirmed
+        self.grant_misses = 0
+        if self.grant:
+            self._log("grant", from_level=self.level, to_level=level)
+        self.level_verdict = None
+        self.blocked_calls = 0
+        self.deny_followup = None
         self.level = level
         self.level_actions = 0
         self.refusals = 0
@@ -248,19 +438,48 @@ class WorldModelGate:
         self.heldout = []
         self.confirmed = False
 
+    # --- profile (M3: one source for the gate, the prompt and the logs) ---
+
+    @property
+    def base_profile(self) -> GateProfile:
+        return GateProfile(probe_actions=self.probe_actions, change_floor=CHANGE_FLOOR,
+                           min_informative=MIN_INFORMATIVE, pass_accuracy=PASS_ACCURACY,
+                           blocked_call_release=self.max_refusals, forced=not self.optional)
+
+    @property
+    def profile(self) -> GateProfile:
+        return profile_for(self.game_class, self.base_profile)
+
+    def observe_class(self, valid_actions: list[str]) -> None:
+        # No event of its own (the event sequence stays as before): every record carries `game_class`,
+        # so a change shows in the field of the next record.
+        game_class = classify(valid_actions)
+        if game_class is not None:
+            self.game_class = game_class
+
+    def _shadow(self, requested: int) -> dict[str, bool]:
+        """Would each shadow profile also refuse this request? Logged only, never enforced."""
+        out = {}
+        for name, alt in shadow_profiles(self.profile).items():
+            remaining = alt.probe_actions - self.level_actions
+            out[name] = alt.forced and requested > max(0, remaining)
+        return out
+
     def check_action(self, requested: int) -> str | None:
         """None if the actions may run; otherwise the refusal message."""
-        if self.optional:
+        profile = self.profile
+        if not profile.forced:
             return None
-        if self.released or self._model_ok():
+        if self.released or self._model_ok() or self.grant:
             return None
         if self.release_after_accept and self.ever_accepted:
             return None
-        remaining = self.probe_actions - self.level_actions
+        remaining = profile.probe_actions - self.level_actions
         if remaining > 0:
             if requested <= remaining:
                 return None
-            self._log("batch_capped", level=self.level, requested=requested, remaining=remaining)
+            self._log("batch_capped", level=self.level, requested=requested, remaining=remaining,
+                      shadow=self._shadow(requested))
             return (
                 f"World-model gate: at most {remaining} more action(s) are allowed on this level "
                 "before an accepted `predict(ascii, action)` is required. Send a smaller batch."
@@ -270,14 +489,110 @@ class WorldModelGate:
             self.released = True
             self._log("released_sim_free", level=self.level, refusals=self.refusals - 1)
             return None
-        self._log("refused", level=self.level, refusal=self.refusals, requested=requested)
+        self._log("refused", level=self.level, refusal=self.refusals, requested=requested,
+                  shadow=self._shadow(requested))
+        if self.full:
+            # compared with the predict the model last submitted, not the stored (accepted) one
+            self.deny_followup = {"predict": self.submitted_predict,
+                                  "accuracy": (self.level_verdict or {}).get("accuracy")}
         return (
             "World-model gate: action() is blocked. Define `def predict(ascii, action)` in a python "
             "cell (top level) that returns the next board ascii for a given board ascii and action "
             "string; the harness backtests it on recorded transitions and unblocks actions once it "
-            f"predicts at least {int(PASS_ACCURACY * 100)}% of informative transitions. "
+            f"predicts at least {int(profile.pass_accuracy * 100)}% of informative transitions. "
             f"Refusal {self.refusals} of {self.max_refusals}."
-        )
+        ) + self._deny_evidence()
+
+    def evidence_line(self) -> str:
+        """M1b: the level's last verdict in one short line (250 characters at most)."""
+        p = self.profile
+        rule = f"needs {p.min_informative}+ moves changing >{p.change_floor} cells, {int(p.pass_accuracy * 100)}% matched"
+        v = self.level_verdict
+        if v is None:
+            return f"No predict has been judged on this level yet ({rule})."
+        if v.get("reason") == "backtest_failed":
+            if self.capture_feedback and v.get("error"):
+                return f"Your last predict's backtest failed to run: {v['error']} ({rule})."[:250]
+            return f"Your last predict's backtest failed to run ({rule})."
+        line = (f"Your last predict matched {round(v['accuracy'] * v['informative'])} of {v['informative']} "
+                f"informative moves ({rule}).")
+        miss = v.get("first_miss")
+        if miss and self.capture_feedback:
+            line += " " + self._miss_sentence(miss)
+        elif miss:
+            off = "raised an error" if miss["miss"] is None else f"was off by {miss['miss']} cells"
+            line += f" First miss: {miss['action']} changed {miss['changed']} cells and predict {off}."
+        return line[:250]
+
+    def _deny_evidence(self) -> str:
+        return (" " + self.evidence_line()) if self.full else ""
+
+    def blocked(self) -> bool:
+        """The level is blocked: it has refused an action and would still refuse the next one."""
+        if not self.profile.forced or self.refusals == 0 or self.released or self.grant or self._model_ok():
+            return False
+        return not (self.release_after_accept and self.ever_accepted)
+
+    def blocked_note(self, level: int | None) -> str | None:
+        """M1b re-injection: the evidence line for the next user prompt while the level is blocked. `level` is
+        the board's level now; the gate sees a new level only at the next action() call, so a stale level
+        means the block it remembers is over."""
+        if not self.full or level != self.level or not self.blocked():
+            return None
+        return "World-model gate: action() is blocked on this level. " + self.evidence_line()
+
+    def released_note(self, level: int | None) -> str | None:
+        """all-nocont-fbx: while a level is released without an accepted predict (valve or refusal cap), the
+        next prompts say so; the system prompt says action() stays refused until predict is accepted."""
+        if not self.fixes or level != self.level or not self.released or self._model_ok():
+            return None
+        return ("World-model gate: action() is unblocked on this level: the gate released it without an "
+                "accepted predict. Play with action(...) now; a predict is not needed on this level.")
+
+    def note_model_call(self) -> None:
+        """M1d release valve: after `blocked_call_release` model calls on a blocked level with no accepted
+        model, the level is released. It applies alongside the refusal cap; whichever comes first releases."""
+        if not self.full or not self.blocked():
+            return
+        self.blocked_calls += 1
+        if self.blocked_calls >= self.profile.blocked_call_release:
+            self.released = True
+            self._log("released_blocked_calls", level=self.level, calls=self.blocked_calls,
+                      refusals=self.refusals)
+
+    def _open_for_probes(self) -> bool:
+        if not self.profile.forced or self.released or self.grant or self._model_ok():
+            return False
+        return not (self.release_after_accept and self.ever_accepted)
+
+    def batch_allowance(self, requested: int) -> int:
+        """M4c (WM_MECHANISMS=all): a batch longer than the probe actions left runs truncated to them instead
+        of being refused whole, which would cost a model call; other arms keep the old cap."""
+        if not self.full or not self._open_for_probes():
+            return requested
+        remaining = self.profile.probe_actions - self.level_actions
+        if 0 < remaining < requested:
+            self._log("batch_truncated", level=self.level, requested=requested, allowed=remaining)
+            return remaining
+        return requested
+
+    def probe_line(self, level: int | None) -> str | None:
+        """M4c: the probe actions left on the board's level, for the user prompt (WM_MECHANISMS=all)."""
+        if not self.full:
+            return None
+        if self.level is not None and level != self.level:
+            if self.confirmed:
+                return None  # the next action() hands this level a grant: no probe limit applies
+            remaining = self.profile.probe_actions  # a new level the gate has not seen yet
+        elif not self._open_for_probes():
+            return None
+        else:
+            remaining = self.profile.probe_actions - self.level_actions
+        if remaining <= 0:
+            return None
+        return (f"World-model gate: {remaining} probe action(s) left on this level before your predict must be "
+                "accepted. Send them together in one action([...]) list of moves that change the board, then "
+                "check the result.")
 
     def record_actions(self, executed: int) -> None:
         self.level_actions += max(0, executed)
@@ -286,7 +601,7 @@ class WorldModelGate:
         if self.accepted_at is None:
             return False
         recent = self.prequential[-PREQUENTIAL_WINDOW:]
-        if len(recent) < MIN_INFORMATIVE:
+        if len(recent) < self.profile.min_informative:
             return True
         return sum(recent) / len(recent) >= PREQUENTIAL_FLOOR
 
@@ -298,13 +613,30 @@ class WorldModelGate:
         errored: bool,
         run_backtest: Callable[[str], list[list[Any]] | None],
     ) -> None:
-        captured = None if errored else extract_definitions(code)
+        self.last_verdict = None
+        if self.grant:
+            # M1c: the carried model is scored after every cell while the grant holds, whatever the cell did
+            # (a cell that redefines predict would otherwise skip the revoke check for the whole level).
+            self._track_grant(run_backtest(self.stored_source()))
+        captured = None if errored else extract_definitions(code, self.fixes, stored_names(self.store))
         if captured is not None:
             candidate = dict(self.store)
             candidate.update(captured)
+            self.backtest_error = None
             rows = run_backtest("\n\n".join(candidate.values()))
             verdict = self._judge(rows)
+            if rows is None and self.capture_feedback:
+                verdict["error"] = self.backtest_error
+            self.last_verdict = verdict
+            self.level_verdict = verdict
             self._log("captured", level=self.level, names=sorted(captured), **verdict)
+            if self.deny_followup is not None:
+                before = self.deny_followup
+                self._log("deny_followup", level=self.level,
+                          predict_changed=captured.get("predict") != before["predict"],
+                          accuracy_before=before["accuracy"], accuracy_after=verdict.get("accuracy"))
+                self.deny_followup = None
+            self.submitted_predict = captured.get("predict")
             if verdict["passed"]:
                 self.store = candidate
                 self.accepted_at = verdict["n_transitions"]
@@ -314,6 +646,7 @@ class WorldModelGate:
                 self.confirmed = False
                 self.scored_through = verdict["n_transitions"] - 1
                 self.ever_accepted = True
+                self._end_grant_on_accept()
                 self._log("accepted", level=self.level, at_transition=self.accepted_at)
             return
         if self.accepted_at is not None:
@@ -332,22 +665,54 @@ class WorldModelGate:
                 self.confirmed = False
                 self.scored_through = verdict["n_transitions"] - 1
                 self.ever_accepted = True
+                self._end_grant_on_accept()
                 self._log("accepted", level=self.level, at_transition=self.accepted_at, carried=True)
+
+    def _end_grant_on_accept(self) -> None:
+        """An accepted model supersedes the grant (prequential scoring takes over), and the release valve
+        counts only calls made after the new acceptance."""
+        if self.grant:
+            self.grant = False
+            self._log("grant_superseded", level=self.level)
+        self.blocked_calls = 0
+
+    def _track_grant(self, rows: list[list[Any]] | None) -> None:
+        """M1c: two consecutive informative misses of the carried model on this level revoke the grant; only
+        the flag is cleared, so the normal gate resumes from the level's action count. Only moves played
+        within this level count: not the move that completed the last level, nor a RESET's board."""
+        for row in rows or []:
+            within = len(row) > 6 and row[4] == self.level and row[6] == self.level
+            if row[0] <= self.grant_scored_through or not within:
+                continue
+            self.grant_scored_through = row[0]
+            if row[1] <= self.profile.change_floor:
+                continue
+            self.grant_misses = 0 if _is_hit(row[1], row[2]) else self.grant_misses + 1
+            if self.grant_misses >= 2:
+                self.grant = False
+                self._log("grant_revoked", level=self.level, transition=row[0])
+                return
 
     def _judge(self, rows: list[list[Any]] | None) -> dict[str, Any]:
         if rows is None:
             return {"passed": False, "reason": "backtest_failed", "n_transitions": 0}
         scoped = [r for r in rows if self.level is None or len(r) < 5 or r[4] == self.level]
-        informative = [r for r in scoped if r[1] > CHANGE_FLOOR]
+        profile = self.profile
+        informative = [r for r in scoped if r[1] > profile.change_floor]
         hits = [r for r in informative if _is_hit(r[1], r[2])]
+        misses = [r for r in informative if not _is_hit(r[1], r[2])]
+        first_miss = ({"transition": misses[0][0], "action": misses[0][5] if len(misses[0]) > 5 else "?",
+                       "changed": misses[0][1], "miss": misses[0][2],
+                       "shape": misses[0][7] if len(misses[0]) > 7 else None} if misses else None)
         accuracy = len(hits) / len(informative) if informative else 0.0
         n_transitions = (max(r[0] for r in rows) + 1) if rows else 0
         return {
-            "passed": len(informative) >= MIN_INFORMATIVE and accuracy >= PASS_ACCURACY,
+            "passed": len(informative) >= profile.min_informative and accuracy >= profile.pass_accuracy,
             "accuracy": round(accuracy, 3),
             "informative": len(informative),
             "errors": sum(1 for r in rows if r[3]),
             "n_transitions": n_transitions,
+            "first_miss": first_miss,
         }
 
     def _score_prequential(self, rows: list[list[Any]] | None) -> None:
@@ -358,7 +723,7 @@ class WorldModelGate:
             if index <= self.scored_through:
                 continue
             self.scored_through = index
-            if changed <= CHANGE_FLOOR:
+            if changed <= self.profile.change_floor:
                 continue
             hit = _is_hit(changed, miss)
             self.prequential.append(hit)

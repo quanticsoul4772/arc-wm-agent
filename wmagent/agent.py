@@ -17,7 +17,14 @@ from typing import Any
 import requests
 
 from wmagent import prompts
-from wmagent.world_model_gate import BACKTEST_DRIVER, WorldModelGate
+from wmagent.progress import ProgressMonitor
+from wmagent.world_model_gate import (
+    BACKTEST_DRIVER,
+    ELIDE_IMAGE_MECHANISMS,
+    FULL_MECHANISMS,
+    WorldModelGate,
+    mechanisms_from_env,
+)
 
 # ---------------------------------------------------------------------------
 # configuration (read from the environment at import time; names are the interface)
@@ -30,14 +37,20 @@ def _env(name: str, default: str) -> str:
 
 
 def _env_num(name: str, default: float, cast: Callable[[str], Any] = float) -> Any:
+    raw = _env(name, str(default))
     try:
-        return cast(_env(name, str(default)))
+        return cast(raw)
     except ValueError:
-        return cast(str(default))
+        raise ValueError(f"{name}={raw!r} is not a valid {cast.__name__}") from None
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    return _env(name, "1" if default else "0").lower() in {"1", "true", "yes", "y", "on"}
+    raw = _env(name, "1" if default else "0").lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name}={raw!r} is not a boolean (1/0, true/false, yes/no, on/off)")
 
 
 @dataclass(frozen=True)
@@ -58,6 +71,8 @@ class AgentConfig:
     enable_thinking: bool
     multimodal_context: str
     multimodal_upscale: int
+    mechanisms: str = "base"
+    image_tokens: int = 0  # LOCAL_ANALYZER_IMAGE_TOKENS: 0 keeps the base64/3 estimate (every arm up to C204)
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -80,6 +95,8 @@ class AgentConfig:
             enable_thinking=_env_bool("LOCAL_ANALYZER_ENABLE_THINKING", True),
             multimodal_context=_env("MULTIMODAL_CONTEXT", "current_grid"),
             multimodal_upscale=_env_num("MULTIMODAL_UPSCALE", 4, int),
+            mechanisms=mechanisms_from_env(),
+            image_tokens=_env_num("LOCAL_ANALYZER_IMAGE_TOKENS", 0, int),
         )
 
     @property
@@ -304,9 +321,28 @@ def extract_notes(text: str) -> dict[str, str]:
     return notes
 
 
-def estimate_tokens(messages: list[dict[str, Any]]) -> float:
+def estimate_tokens(messages: list[dict[str, Any]], image_tokens: int = 0) -> float:
+    """Characters/3 of the request payload. With `image_tokens` > 0 (LOCAL_ANALYZER_IMAGE_TOKENS) each image part
+    counts that many tokens instead of its base64 text/3: a board's ~1,440 base64 characters were estimated at
+    ~480 tokens, where the model was charged ~170 (C201-C204 logs), so kept images trimmed text history early."""
+    images = 0
+    if image_tokens > 0:
+        messages, images = _without_image_data(messages)
     payload = {"messages": messages, "tools": TOOLS, "tool_choice": TOOL_CHOICE}
-    return len(json.dumps(payload, sort_keys=True, ensure_ascii=True)) / 3
+    return len(json.dumps(payload, sort_keys=True, ensure_ascii=True)) / 3 + images * image_tokens
+
+
+def _without_image_data(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Copies with every image part's URL emptied, and the number of image parts."""
+    out, images = [], 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(part.get("type") == "image_url" for part in content):
+            images += sum(1 for part in content if part.get("type") == "image_url")
+            message = {**message, "content": [{"type": "image_url", "image_url": {"url": ""}}
+                                              if part.get("type") == "image_url" else part for part in content]}
+        out.append(message)
+    return out, images
 
 
 def drop_oldest_block(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -335,20 +371,21 @@ def _user_first(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return history[start:]
 
 
-def trim_messages(messages: list[dict[str, Any]], budget: float) -> list[dict[str, Any]]:
+def trim_messages(messages: list[dict[str, Any]], budget: float, image_tokens: int = 0) -> list[dict[str, Any]]:
     """Drop oldest history blocks until under budget, then start history at a user message."""
     system, history = messages[0], list(messages[1:])
-    while len(history) > 1 and estimate_tokens([system, *history]) > budget:
+    while len(history) > 1 and estimate_tokens([system, *history], image_tokens) > budget:
         history = drop_oldest_block(history)
     return [system, *_user_first(history)]
 
 
-def persistable_history(messages: list[dict[str, Any]], budget: float | None = None) -> list[dict[str, Any]]:
+def persistable_history(messages: list[dict[str, Any]], budget: float | None = None,
+                        image_tokens: int = 0) -> list[dict[str, Any]]:
     """History to keep after a turn: trimmed to the budget, no system, the last 30 assistant
     messages. If the cut lands right after a user message, that message is kept too; otherwise
     leading messages are dropped up to the next user message."""
     if budget is not None and messages and messages[0].get("role") == "system":
-        messages = trim_messages(messages, budget)
+        messages = trim_messages(messages, budget, image_tokens)
     history = [m for m in messages if m.get("role") != "system"]
     assistant_positions = [i for i, m in enumerate(history) if m.get("role") == "assistant"]
     if len(assistant_positions) > MAX_PERSISTED_ASSISTANT:
@@ -476,6 +513,18 @@ def latch_stub(latched: dict[str, Any], reason: str, requested: int) -> dict[str
     }
 
 
+_TOOL_LINE = re.compile(r'(File "<python_tool>", line )(\d+)')
+
+
+def _cell_line_numbers(error: str, offset: int) -> str:
+    """all-nocont-fbx: traceback line numbers counted from the model's own cell, not from the stored definitions
+    the gate runs above it (145 of 322 tracebacks in C200's arms pointed past the end of the cell)."""
+    def fix(m: re.Match) -> str:
+        line = int(m.group(2)) - offset
+        return f"{m.group(1)}{line}" if line > 0 else f"{m.group(1)}{m.group(2)} (in the stored definitions)"
+    return _TOOL_LINE.sub(fix, error)
+
+
 def executed_count_of(result: dict[str, Any]) -> int:
     if "executed_count" in result:
         return int(result.get("executed_count") or 0)
@@ -541,6 +590,35 @@ def _elide_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+BOARD_IMAGE_OMITTED = "<board image omitted>"
+
+
+def _without_board_image(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return message
+    if not any(part.get("type") == "image_url" for part in content):
+        return message
+    parts = [{"type": "text", "text": BOARD_IMAGE_OMITTED} if part.get("type") == "image_url" else part
+             for part in content]
+    return {**message, "content": parts}
+
+
+def _request_display(item: dict[str, Any]) -> str:
+    """The display string the session gives a requested action (MOUSE(row=r, col=c), clamped 0..63). A
+    malformed item gets its repr; the session's own validation then answers it as before."""
+    if not isinstance(item, dict):
+        return repr(item)
+    label = to_label(str(item.get("action", "")).strip().upper())
+    if label != "MOUSE":
+        return label
+    try:
+        row, col = (min(63, max(0, int(item.get(k)))) for k in ("row", "col"))
+    except (TypeError, ValueError, OverflowError):
+        return label
+    return f"MOUSE(row={row}, col={col})"
+
+
 def _default_sandbox() -> tuple[Callable[..., dict[str, Any]], type[Exception]]:
     from wmagent.sandbox import ActionRefused, run_sandboxed_python
 
@@ -570,8 +648,10 @@ class ToolAgent:
         self.clock = clock
         self.http = requests.Session()
         self.system_prompt = prompts.system_prompt(
-            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8)
+            self.gate_mode, self.gate.probe_actions if self.gate is not None else 8, self.config.mechanisms,
+            self.gate.profile if self.gate is not None else None)
         self._state_path: Path | None = None
+        self.progress: ProgressMonitor | None = None
         self._new_game()
 
     @property
@@ -592,6 +672,8 @@ class ToolAgent:
         self._recovered_ids = 0
         self._saved_history: list[dict[str, Any]] = []
         self._system_logged = False
+        self._request_counter = 0  # per game: names snapshots and request-log rows (a yield keeps the step)
+        self._continuing = False  # M2c: the last turn yielded with its history kept
 
     def sandbox(self) -> tuple[Callable[..., dict[str, Any]], type[Exception]]:
         if self._sandbox is None:
@@ -651,7 +733,7 @@ class ToolAgent:
             try:
                 return self.send(messages, timeout), messages
             except ContextLengthError:
-                trimmed = trim_messages(messages, self.config.budget - SAFETY_TOKENS)
+                trimmed = trim_messages(messages, self.config.budget - SAFETY_TOKENS, self.config.image_tokens)
                 if len(trimmed) == len(messages):
                     trimmed = [messages[0], *_user_first(drop_oldest_block(messages[1:]))]
                 if len(trimmed) == len(messages):
@@ -678,6 +760,9 @@ class ToolAgent:
             self._new_game()
             if self.gate is not None:
                 self.gate.reset(state_path)
+            # M2 / M4d: the no-progress breaker and level memory (WM_MECHANISMS=all / all-nocont only)
+            self.progress = (ProgressMonitor.for_state(state_path) if self.config.mechanisms in FULL_MECHANISMS
+                             else None)
         saved_history = list(self.history)
         self._saved_history = saved_history
         try:
@@ -711,11 +796,30 @@ class ToolAgent:
         if self.last_summary is not None:
             level = max(level, int(self.last_summary.get("level") or 1))
         seen = [int((entry.get("frame") or {}).get("level") or 1) for entry in runtime.get("history") or []]
-        text = prompts.user_prompt(
-            step=max(int(frame.get("step") or 0), action_count) + 1, level=level,
-            max_level_seen=max([level, *seen]), valid_actions=valid_actions, notes=self.notes,
-            previous_summary=self.last_summary,
-        )
+        next_step = max(int(frame.get("step") or 0), action_count) + 1
+        continuing = self._continuing
+        if continuing:
+            # M2c: the previous turn yielded without playing and its history was kept, so the full prompt and
+            # turn guide would only be re-sent; a short note keeps the open turn going.
+            text = prompts.continuation_prompt(step=next_step, level=level, valid_actions=valid_actions)
+        else:
+            text = prompts.user_prompt(
+                step=next_step, level=level,
+                max_level_seen=max([level, *seen]), valid_actions=valid_actions, notes=self.notes,
+                previous_summary=self.last_summary,
+            )
+        self._continuing = False
+        blocked = self.gate.blocked_note(int(frame.get("level") or 1)) if self.gate is not None else None
+        if blocked:
+            text += "\n\n" + blocked  # M1b: the deny evidence is carried while the level stays blocked
+        board_level = int(frame.get("level") or 1)
+        extra = [
+            self.gate.probe_line(board_level) if self.gate is not None else None,  # M4c
+            self.gate.released_note(board_level) if self.gate is not None else None,  # fbx: release announced
+            self.progress.take_stuck_line() if self.progress is not None else None,  # M2b
+            self.progress.memory_block() if self.progress is not None and not continuing else None,  # M4d
+        ]
+        text += "".join("\n\n" + line for line in extra if line)
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         if self.config.multimodal_context == "current_grid" and frame.get("grid"):
             url = grid_png_data_url(frame["grid"], self.config.multimodal_upscale)
@@ -726,7 +830,8 @@ class ToolAgent:
         self._log(transcript, "USER PROMPT", text)
 
         system = {"role": "system", "content": self.system_prompt}
-        messages = trim_messages([system, *self.history, {"role": "user", "content": content}], self.config.budget)
+        messages = trim_messages([system, *self.history, {"role": "user", "content": content}], self.config.budget,
+                                 self.config.image_tokens)
         ctx = _TurnContext(valid_actions=valid_actions, step_env=step_env, state_path=state_path)
         reasoning_seen: list[str] = []
 
@@ -746,11 +851,26 @@ class ToolAgent:
             if self.config.tool_steps > 0 and requests_made >= self.config.tool_steps:
                 return self._finish_turn(messages, ctx, reasoning_seen, transcript, yielded="tool_step_limit")
             timeout = request_timeout() if callable(request_timeout) else request_timeout
-            messages = trim_messages(messages, self.config.budget)
-            self._snapshot(state_path, step, requests_made, messages)
-            reply, messages = self._request_with_trim(messages, timeout)
+            before_trim = len(messages)
+            messages = trim_messages(messages, self.config.budget, self.config.image_tokens)
+            self._request_counter += 1
+            if self.gate is not None:
+                self.gate.request = self._request_counter
+            self._snapshot(state_path, step, self._request_counter, messages)
+            sent = len(messages)
+            request_started = time.time()
+            try:
+                reply, messages = self._request_with_trim(messages, timeout)
+            except AnalyzerRequestError as exc:
+                # the failed request gets its row too (re-raised: analyze() reverts the turn and reports it)
+                self._log_request(state_path, step, requests_made + 1, request_started, before_trim, sent, messages,
+                                  {}, error=f"{type(exc).__name__}: {exc}")
+                raise
             requests_made += 1
+            if self.gate is not None:
+                self.gate.note_model_call()  # M1d release valve (WM_MECHANISMS=all only)
             generated = self._account(reply["usage"])
+            self._log_request(state_path, step, requests_made, request_started, before_trim, sent, messages, reply)
             message = reply["message"]
             raw_content = message.get("content") or ""
             raw_reasoning = clean_text(message.get("reasoning") or message.get("reasoning_content") or "")
@@ -833,7 +953,11 @@ class ToolAgent:
     def _finish_turn(self, messages, ctx: _TurnContext, reasoning_seen, transcript, yielded: str | None = None,
                      persist: bool = True):
         if persist:
-            self.history = persistable_history(messages, self.config.budget)
+            self.history = persistable_history(messages, self.config.budget, self.config.image_tokens)
+            if self.config.mechanisms in ELIDE_IMAGE_MECHANISMS:
+                # M4b: a user message loses its board image when it is kept, once; the live request carries the
+                # current board, and a message never changes after it is kept.
+                self.history = [_without_board_image(m) for m in self.history]
         else:
             self.history = list(self._saved_history)
         if ctx.results:
@@ -844,6 +968,11 @@ class ToolAgent:
                 for key in prompts.LEVEL_SCOPED_NOTES:
                     self.notes.pop(key, None)
         reasoning = "\n".join(reasoning_seen)
+        # M2c: continue with a short prompt only when this turn's own messages were kept; after a reverted
+        # history the model would not see what it was doing, so the next turn gets the full prompt. Off in
+        # all-nocont.
+        self._continuing = (self.config.mechanisms == "all" and bool(yielded) and not ctx.executed_any
+                            and persist and yielded != "stop_requested")
         if yielded and not ctx.executed_any:
             self._log(transcript, "STATUS", f"yield: {yielded}")
             return self._outcome(False, yielded=True, reasoning=reasoning, yield_reason=yielded)
@@ -882,16 +1011,42 @@ class ToolAgent:
             # only before the check, so a level completed by this batch is still scored on the old
             # level by after_cell. A refusal raises out of the handler and the sandbox surfaces it
             # to model code as RuntimeError(msg).
+            truncated = 0
             if self.gate is not None:
                 self.gate.observe_level(_current_level(ctx.state_path))
+                self.gate.observe_class(ctx.valid_actions)
+                allowed = self.gate.batch_allowance(len(items))  # M4c: truncate instead of refusing (all arm)
+                truncated, items = len(items) - allowed, items[:allowed]
                 refusal = self.gate.check_action(len(items))
                 if refusal is not None:
+                    cell.refusal = refusal
                     raise refused(refusal)
+            shadow_hits: list[int] = []
+            if self.progress is not None:
+                runtime = load_runtime_state(ctx.state_path)
+                history = runtime.get("history") or []
+                if history and history[-1].get("action") == "RESET":
+                    self.progress.no_effect.clear()  # the harness restarted the level after GAME_OVER
+                current = runtime.get("current_frame") or {}
+                shadow_hits = self.progress.shadow_check(int(current.get("level") or 1), current.get("grid"),
+                                                         [_request_display(i) for i in items])
             payload = ctx.step_env({"actions": items})
             result = compact_result(payload)
+            if truncated:
+                result["truncated_by_gate"] = (f"only the first {len(items)} action(s) ran: the probe actions "
+                                               f"left on this level; {truncated} were dropped")
+            if self.progress is not None and executed_count_of(payload) > 0:
+                done = executed_count_of(payload)
+                frames = [entry.get("frame") or {} for entry in
+                          (load_runtime_state(ctx.state_path).get("history") or [])[-(done + 1):]]
+                displays = list(payload.get("executed_actions") or [payload.get("action_display")])[:done]
+                if len(frames) == len(displays) + 1:
+                    self.progress.record(frames, displays, shadow_hits)
             if self.gate is not None:
-                # a failed call (error payload, no executed_count) counts 1, as in the original
-                self.gate.record_actions(int(result.get("executed_count", 1) or 0))
+                # a failed call (error payload, no executed_count) counts 1, as in the original; fbx counts
+                # only the actions that ran (a rejected ACTION7 cost up to 4 of 8 probes in C200's arms)
+                self.gate.record_actions(executed_count_of(payload) if self.gate.fixes
+                                         else int(result.get("executed_count", 1) or 0))
             executed = executed_count_of(payload)
             cell.results.append(result)
             if executed > 0:
@@ -910,10 +1065,28 @@ class ToolAgent:
         to_run = self.gate.prepend(code) if self.gate is not None else code
         outcome = run_python(code=to_run, timeout_seconds=self.config.tool_timeout,
                              initial_state=self._state(ctx), action_handler=handle)
+        if self.gate is not None and self.gate.fixes and outcome.get("error") and to_run != code:
+            outcome = {**outcome, "error": _cell_line_numbers(str(outcome["error"]),
+                                                              to_run.count("\n") - code.count("\n"))}
         had_error = bool(outcome.get("error"))
+        gate_note = None
         if self.gate is not None:
-            self.gate.after_cell(code, had_error, lambda src: self._backtest(src, ctx))
-        return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens)
+            # M1a: a cell whose only error is the gate's own refusal ran its definitions before the refused
+            # action(), so its predict is captured and judged. Matched on the error text, not a flag, so a cell
+            # that catches the refusal and then fails for another reason still counts as errored.
+            refusal_only = (self.gate.evaluate_on_deny and had_error and cell.refusal is not None
+                            and str(outcome["error"]).rstrip().endswith("RuntimeError: " + cell.refusal))
+            self.gate.after_cell(code, had_error and not refusal_only, lambda src: self._backtest(src, ctx))
+            if refusal_only or (self.gate.capture_feedback and self.gate.last_verdict is not None):
+                gate_note = self.gate.verdict_note()
+            if self.progress is not None:
+                if cell.refusal is not None:
+                    self.progress.record_refusal(captured=self.gate.last_verdict is not None)
+                elif self.gate.last_verdict is not None:
+                    self.progress.record_capture()
+        if self.progress is not None:
+            self.progress.record_cell(code)
+        return format_tool_result(outcome, cell.results, limit, self.config.tool_output_tokens, gate_note)
 
     def _state(self, ctx: _TurnContext) -> dict[str, Any]:
         return sandbox_state(load_runtime_state(ctx.state_path), ctx.valid_actions, self.last_action_result)
@@ -941,20 +1114,47 @@ class ToolAgent:
             handle.write(f"\n===== {section} =====\n{body}\n")
 
     def _snapshot(self, state_path: Path, step: int, request_index: int, messages: list[dict[str, Any]]) -> None:
+        """One file per request (`request_index` counts the game's requests), so a yield, which keeps the
+        analysis step, no longer overwrites the previous request's snapshot."""
         if self.prompts_dir is None:
             return
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
         folder = Path(self.prompts_dir) / stem
         folder.mkdir(parents=True, exist_ok=True)
         record = {"step": step, "request": request_index, "message_count": len(messages),
-                  "estimated_tokens": round(estimate_tokens(messages)), "messages": _elide_images(messages)}
-        (folder / f"step_{step:04d}.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+                  "estimated_tokens": round(estimate_tokens(messages, self.config.image_tokens)),
+                  "messages": _elide_images(messages)}
+        (folder / f"step_{step:04d}_r{request_index:05d}.json").write_text(json.dumps(record, indent=1),
+                                                                          encoding="utf-8")
+
+    def _log_request(self, state_path: Path, step: int, turn_request: int, started: float, before_trim: int,
+                     sent: int, final: list[dict[str, Any]], reply: dict[str, Any], error: str | None = None) -> None:
+        """M4a context monitor: one row per chat request in <stem>_requests.jsonl next to the state file
+        (logging only). `trimmed` counts messages dropped by the budget trim before the request and by the
+        context-length retry; cached tokens need the server's --enable-prompt-tokens-details (null when 0).
+        A request that failed has no usage and carries `error`."""
+        usage = reply.get("usage") or {}
+        stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
+        row = {
+            "t_start": round(started, 3), "t_end": round(time.time(), 3), "step": step,
+            "request": self._request_counter, "turn_request": turn_request,
+            "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
+            "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+            "estimated_tokens": round(estimate_tokens(final, self.config.image_tokens)), "message_count": len(final),
+            "trimmed": (before_trim - sent) + (sent - len(final)), "finish_reason": reply.get("finish_reason"),
+        }
+        if error is not None:
+            row["error"] = error[:300]
+        path = state_path.with_name(f"{stem}_requests.jsonl")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
 
 
 @dataclass
 class _Cell:
     latched: str | None = None
     latched_result: dict[str, Any] = field(default_factory=dict)
+    refusal: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -989,7 +1189,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, Any]], limit: int,
-                       tool_output_tokens: int | None = None) -> str:
+                       tool_output_tokens: int | None = None, gate_note: str | None = None) -> str:
     tokens = tool_output_tokens if tool_output_tokens is not None else limit // 4
     cut = _Truncator(limit)
     stdout = outcome.get("stdout") or ""
@@ -997,6 +1197,8 @@ def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, A
         body: dict[str, Any] = {"tool": "python", "error": cut(str(outcome["error"]))}
         if stdout:
             body["stdout"] = cut(str(stdout))
+        if gate_note:
+            body["gate"] = gate_note
         return json.dumps(cut.finish(body, tokens), indent=2)
     # Exactly one of: stdout, else result, else the single action result, else the action summary;
     # the last two go under `result` too (the original's precedence).
@@ -1011,4 +1213,6 @@ def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, A
     elif action_results:
         body["result"] = {"action_calls": len(action_results),
                           "last_action_result": _collapse_planned(action_results[-1])}
+    if gate_note:
+        body["gate"] = gate_note  # all-nocont-fb: the verdict on a cell that ran without an error
     return json.dumps(cut.finish(body, tokens), indent=2, default=str)

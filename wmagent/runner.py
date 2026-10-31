@@ -12,8 +12,10 @@ import json
 import math
 import os
 import statistics
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -248,18 +250,34 @@ class Runner:
         heartbeat_stop = threading.Event()
         heartbeat = threading.Thread(target=self._heartbeat, args=(heartbeat_stop, n_passes), daemon=True)
         heartbeat.start()
+        error: Exception | None = None
         try:
+            self._write_run_config()
             self._start_all(runs)
             if ready is not None:
                 self._wait_ready(ready)
             cap = self._per_game_cap(deadline, len(runs))
             self._play_all(deadline, cap)
-        except Exception as exc:  # noqa: BLE001 - a solver-level error is printed, teardown still runs
+        except Exception as exc:  # noqa: BLE001 - printed with its traceback; teardown runs, then offline re-raises
+            error = exc
             print(f"[runner] solver error: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc(file=sys.stdout)
         finally:
             heartbeat_stop.set()
-            result = self._teardown(n_passes)
+            result = self._teardown(n_passes, error)
+        if error is not None and not self.submission:
+            raise error  # offline: benchmark.json is written, then the run fails loud
         return result
+
+    def _write_run_config(self) -> None:
+        """What this run ran with, next to its results: the run config and the agent, gate and server settings
+        from the environment (a run's output alone could not show its yield, temperature or model)."""
+        prefixes = ("LOCAL_ANALYZER_", "PROBE_", "WM_", "MULTIMODAL_", "VLLM_")
+        env = {k: v for k, v in sorted(os.environ.items()) if k.startswith(prefixes)}
+        config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(self.config).items()}
+        document = {"submission": self.submission, "run_config": config, "env": env}
+        (self.output_dir / "run_config.json").write_text(json.dumps(document, indent=2, default=str),
+                                                         encoding="utf-8")
 
     def _start_all(self, runs: list[tuple[str, str]]) -> None:
         """Make every copy serially before any play, as the competition scorecard expects."""
@@ -300,6 +318,9 @@ class Runner:
                 self.play(ctx)
         except Exception as exc:  # noqa: BLE001 - error isolation: only this game crashes
             game.mark_crashed(f"error: {type(exc).__name__}: {exc}")
+            game.end_reason = game.end_reason or "crash"
+            print(f"[runner] {game.label or game.game_id} crashed: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc(file=sys.stdout)
         finally:
             game.finish()
 
@@ -322,10 +343,13 @@ class Runner:
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
-    def _teardown(self, n_passes: int) -> RunResult:
+    def _teardown(self, n_passes: int, error: Exception | None = None) -> RunResult:
+        note = ("error: RuntimeError: still playing at teardown" if error is None
+                else f"error: {type(error).__name__}: {error} (the run failed before this game ended)")
         for game in self.games:
             if game.state == PLAYING and not game.finished:
-                game.mark_crashed("error: RuntimeError: still playing at teardown")
+                game.mark_crashed(note)
+                game.end_reason = game.end_reason or "teardown"
             game.finish()
         if self.engine.scorecard is not None:
             self.engine.scorecard.close()

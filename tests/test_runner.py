@@ -383,6 +383,7 @@ def test_ready_failure_still_finishes_games_and_closes_the_scorecard(tmp_path, m
 
     r, _ = runner(tmp_path, lambda ctx: played.append(1), cfg=config(game_ids="competition"), arcade=arcade,
                   mode=COMPETITION)
-    result = r.run(ready)
-    assert played == [] and arcade.closed == ["card-0"] and all(g.finished for g in result.games)
+    with pytest.raises(RuntimeError, match="vllm failed"):  # offline: re-raised after teardown (test_fail_loud)
+        r.run(ready)
+    assert played == [] and arcade.closed == ["card-0"] and all(g.finished for g in r.games)
     assert "vllm failed" in capsys.readouterr().out

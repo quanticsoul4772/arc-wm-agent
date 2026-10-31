@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -32,6 +33,10 @@ HOST = "127.0.0.1"
 PORT = 1234
 HEALTH_POLL_S = 5.0
 HEALTH_TIMEOUT_S = 2400.0
+HEALTH_PROGRESS_S = 60.0  # wait_healthy prints a line this often (it was silent for up to 40 minutes)
+INSTALL_TIMEOUT_S = 1800.0  # the wheelhouse install had no bound
+WATCH_POLL_S = 30.0
+WATCH_GPU_S = 600.0
 # vLLM's load of the 35.9 GB snapshot straight from the gcsfuse input mount did not finish in 2,400 s
 # (wm-run-paper-check v1/v2), while one sequential read ran at 45 MB/s (wm-model-read-test, 2026-10-24).
 STAGE_DIR = Path("/tmp/wmagent-model")
@@ -74,7 +79,7 @@ def install_wheelhouse(wheelhouse: Path, target: Path) -> bool:
         "-r", str(wheelhouse / "requirements.lock"), "--target", str(target),
         "--only-binary", ":all:", "--no-compile", "--ignore-installed", "--upgrade",
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=INSTALL_TIMEOUT_S)
     stamp.write_text(STAMP + "\n")
     return True
 
@@ -111,7 +116,7 @@ def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[st
         "--model", str(model_dir), "--served-model-name", SERVED_MODEL,
         "--host", host, "--port", str(port), "--tensor-parallel-size", "1",
         "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3",
-        "--generation-config", "vllm", "--enable-prefix-caching",
+        "--generation-config", "vllm", "--enable-prefix-caching", "--enable-prompt-tokens-details",
         "--default-chat-template-kwargs", json.dumps({"preserve_thinking": True}),
         "--max-model-len", "65536",
     ]
@@ -142,8 +147,11 @@ def _log_tail(path: Path, n: int = 40) -> str:
         return ""
 
 
-def wait_healthy(handle: ServerHandle, timeout_s: float = HEALTH_TIMEOUT_S, poll_s: float = HEALTH_POLL_S) -> None:
-    deadline = time.monotonic() + timeout_s
+def wait_healthy(handle: ServerHandle, timeout_s: float = HEALTH_TIMEOUT_S, poll_s: float = HEALTH_POLL_S,
+                 progress_s: float = HEALTH_PROGRESS_S) -> None:
+    start = time.monotonic()
+    deadline = start + timeout_s
+    next_progress = start + progress_s
     while True:
         rc = handle.proc.poll()
         if rc is not None:
@@ -153,9 +161,46 @@ def wait_healthy(handle: ServerHandle, timeout_s: float = HEALTH_TIMEOUT_S, poll
                 return
         except (urllib.error.URLError, ConnectionError, OSError):
             pass
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             raise TimeoutError(f"server not healthy after {timeout_s:.0f}s:\n{_log_tail(handle.log_path)}")
+        if now >= next_progress:
+            last = (_log_tail(handle.log_path, 1) or "(no log yet)").strip()[:200]
+            print(f"[setup_vllm] waiting for the server: {now - start:.0f}s; last log line: {last}", flush=True)
+            next_progress = now + progress_s
         time.sleep(poll_s)
+
+
+def gpu_memory() -> str:
+    """`used / total MiB` per GPU from nvidia-smi, or why it is unavailable."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader"],
+                             check=True, capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"unavailable ({type(exc).__name__})"
+    return "; ".join(line.strip() for line in out.splitlines() if line.strip())
+
+
+def start_watchdog(handle: ServerHandle, poll_s: float = WATCH_POLL_S, gpu_s: float = WATCH_GPU_S) -> threading.Thread:
+    """During the run: print the server's exit code and log tail the moment it dies (games would otherwise only
+    show request failures), and GPU memory every `gpu_s` seconds. Stops at teardown."""
+    def watch() -> None:
+        next_gpu = time.monotonic() + gpu_s
+        while not handle.torn_down:
+            rc = handle.proc.poll()
+            if rc is not None:
+                if not handle.torn_down:
+                    print(f"[setup_vllm] model server exited with code {rc} during the run:\n"
+                          f"{_log_tail(handle.log_path)}", flush=True)
+                return
+            if time.monotonic() >= next_gpu:
+                print(f"[setup_vllm] GPU memory: {gpu_memory()}", flush=True)
+                next_gpu = time.monotonic() + gpu_s
+            time.sleep(poll_s)
+
+    thread = threading.Thread(target=watch, name="vllm-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 def smoke_chat(base_url: str, model: str = SERVED_MODEL, timeout_s: float = 300.0) -> str:

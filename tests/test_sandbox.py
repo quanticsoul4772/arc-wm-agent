@@ -132,10 +132,10 @@ def test_rlimits_are_applied_to_the_child():
     assert limits["Max open files"] == ["32", "32"]
 
 
-def test_unexpected_exit_gives_generic_error(monkeypatch):
+def test_unexpected_exit_names_the_exit_code(monkeypatch):
     monkeypatch.setattr(sandbox.sys, "executable", "/bin/false")
     out = _run("print(1)")
-    assert out["error"] == "Sandbox process exited unexpectedly."
+    assert out["error"].startswith("Sandbox process exited unexpectedly (exit code 1)")
 
 
 def test_invalid_json_gives_generic_error(monkeypatch):
