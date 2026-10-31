@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -36,6 +37,11 @@ HEALTH_TIMEOUT_S = 2400.0
 HEALTH_PROGRESS_S = 60.0  # wait_healthy prints a line this often (it was silent for up to 40 minutes)
 INSTALL_TIMEOUT_S = 1800.0  # the wheelhouse install had no bound
 WATCH_POLL_S = 30.0
+# WM_SPEC_MTP_TOKENS > 0: speculative decoding with the model's multi-token-prediction head (paths.MTP_REF),
+# that many draft tokens per step. 0 (default) is the server as before.
+SPEC_ENV = "WM_SPEC_MTP_TOKENS"
+SPEC_MIN_ACCEPTANCE = 1.3  # mean accepted tokens per step on the counting check; ~1.0 means the head did not load
+SPEC_CHECK_TIMEOUT_S = 90.0
 WATCH_GPU_S = 600.0
 # vLLM's load of the 35.9 GB snapshot straight from the gcsfuse input mount did not finish in 2,400 s
 # (wm-run-paper-check v1/v2), while one sequential read ran at 45 MB/s (wm-model-read-test, 2026-10-24).
@@ -110,7 +116,32 @@ def stage_model(model_dir: Path, dest: Path = STAGE_DIR) -> Path:
     return dest
 
 
-def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[str]:
+def spec_tokens(agent_env: dict[str, str]) -> int:
+    raw = str(agent_env.get(SPEC_ENV, "0")).strip() or "0"
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{SPEC_ENV}={raw!r} is not an integer") from None
+    if value < 0:
+        raise ValueError(f"{SPEC_ENV}={value} must be >= 0")
+    return value
+
+
+def add_mtp_head(staged: Path, mtp_dir: Path) -> None:
+    """Copy the BF16 MTP head next to the FP8 weights and keep it out of the FP8 scheme (compressed-tensors
+    `ignore`), so vLLM loads it unquantized."""
+    shutil.copyfile(mtp_dir / "mtp.safetensors", staged / "mtp.safetensors")
+    config_path = staged / "config.json"
+    config = json.loads(config_path.read_text())
+    ignore = config.setdefault("quantization_config", {}).setdefault("ignore", [])
+    if "re:.*mtp.*" not in ignore:
+        ignore.append("re:.*mtp.*")
+    config_path.write_text(json.dumps(config, indent=2))
+    print(f"[setup_vllm] MTP head grafted from {mtp_dir}", flush=True)
+
+
+def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT, spec: int = 0) -> list[str]:
+    extra = ["--speculative-config", json.dumps({"method": "mtp", "num_speculative_tokens": spec})] if spec else []
     return [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", str(model_dir), "--served-model-name", SERVED_MODEL,
@@ -119,6 +150,7 @@ def vllm_command(model_dir: Path, host: str = HOST, port: int = PORT) -> list[st
         "--generation-config", "vllm", "--enable-prefix-caching", "--enable-prompt-tokens-details",
         "--default-chat-template-kwargs", json.dumps({"preserve_thinking": True}),
         "--max-model-len", "65536",
+        *extra,
     ]
 
 
@@ -221,6 +253,35 @@ def smoke_chat(base_url: str, model: str = SERVED_MODEL, timeout_s: float = 300.
     return text
 
 
+def check_spec_acceptance(base_url: str, log_path: Path, model: str = SERVED_MODEL,
+                          timeout_s: float = SPEC_CHECK_TIMEOUT_S, minimum: float = SPEC_MIN_ACCEPTANCE) -> float:
+    """A predictable generation (counting), then vLLM's logged mean acceptance length must reach `minimum`: a draft
+    head that did not load (random weights) accepts ~1.0 tokens per step and only slows the server down."""
+    start = log_path.stat().st_size if log_path.is_file() else 0
+    body = {"model": model, "stream": False, "max_tokens": 240, "temperature": 0.0,
+            "messages": [{"role": "user", "content": "Count from 1 to 60, separated by commas. Output only the numbers."}],
+            "chat_template_kwargs": {"enable_thinking": False}}
+    req = urllib.request.Request(f"{base_url}/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        json.loads(r.read())
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            found = re.findall(rb"Mean acceptance length: ([0-9.]+)", f.read())
+        if found:
+            value = float(found[-1])
+            print(f"[setup_vllm] speculative decoding: mean acceptance length {value:.2f}", flush=True)
+            if value < minimum:
+                raise RuntimeError(f"MTP mean acceptance length {value:.2f} < {minimum}: the draft head did not load "
+                                   f"or does not match the model\n{_log_tail(log_path)}")
+            return value
+        time.sleep(2.0)
+    raise RuntimeError(f"no 'Mean acceptance length' line in the server log within {timeout_s:.0f}s of the "
+                       f"speculative-decoding check\n{_log_tail(log_path)}")
+
+
 def launch(cmd: list[str], env: dict[str, str], log_path: Path, pid_path: Path,
            site_packages: Path | None, base_url: str) -> ServerHandle:
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +355,7 @@ def export_env(env: dict[str, str]) -> None:
 def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, agent_env: dict[str, str],
           server_cmd: list[str] | None = None, host: str = HOST, port: int = PORT,
           check_gpu_first: bool = True, health_timeout_s: float = HEALTH_TIMEOUT_S,
-          base_env: dict[str, str] | None = None) -> ServerHandle:
+          base_env: dict[str, str] | None = None, mtp_dir: Path | None = None) -> ServerHandle:
     """Bring the server up and export the agent env.
 
     `server_cmd` replaces the vLLM command (a stub server for local tests); with it,
@@ -302,17 +363,22 @@ def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, age
     """
     t0 = time.monotonic()
     site_packages: Path | None = None
+    spec = spec_tokens(agent_env)
+    if spec and server_cmd is None and mtp_dir is None:
+        raise ValueError(f"{SPEC_ENV}={spec} needs the MTP head dataset (paths.MTP_REF)")
     if server_cmd is None:
         if check_gpu_first:
             print(f"[setup_vllm] GPU: {check_gpu()}", flush=True)
         if model_dir is None or wheelhouse is None:
             raise ValueError("model_dir and wheelhouse are required to launch vLLM")
         model_dir = stage_model(model_dir)
+        if spec:
+            add_mtp_head(model_dir, mtp_dir)
         site_packages = working / "vllm-site-packages"
         site_packages.mkdir(parents=True, exist_ok=True)
         fresh = install_wheelhouse(wheelhouse, site_packages)
         print(f"[setup_vllm] wheelhouse {'installed' if fresh else 'reused'} at {site_packages}", flush=True)
-        cmd = vllm_command(model_dir, host, port)
+        cmd = vllm_command(model_dir, host, port, spec)
     else:
         cmd = list(server_cmd)
     base_url = f"http://{host}:{port}/v1"
@@ -321,6 +387,8 @@ def start(*, model_dir: Path | None, wheelhouse: Path | None, working: Path, age
     try:
         wait_healthy(handle, timeout_s=health_timeout_s)
         smoke_chat(base_url)
+        if spec and server_cmd is None:
+            check_spec_acceptance(base_url, handle.log_path)
     except BaseException:
         teardown(handle)
         raise
