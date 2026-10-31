@@ -38,3 +38,14 @@ def test_run_checks_still_stop(tmp_path, capsys):
     assert robustness.main(["--arm", str(arm), "--arm-mechanisms", "other", "--base", str(base),
                             "--games", "12"]) == 1
     assert "RUN CHECK FAILED" in capsys.readouterr().err
+
+
+def test_replicate_runs_are_pooled(tmp_path, capsys):
+    first = _run(tmp_path, "f", "x", [2.0, 1.0] * 6)
+    second = _run(tmp_path, "f2", "x", [0.0, 1.0] * 6)
+    base = _run(tmp_path, "base", "base", [1.0, 1.0] * 6)
+    assert robustness.main(["--arm", str(first), "--arm", str(second), "--arm-mechanisms", "x", "--base", str(base),
+                            "--games", "12", "--draws", "500"]) == 0
+    out = capsys.readouterr().out
+    assert "arm: 24 runs, mean 1.000, games with >= 1 level 18/24 (75%)" in out
+    assert "aa11: arm 1.000  base 1.000  diff +0.000" in out

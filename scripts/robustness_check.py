@@ -4,12 +4,14 @@ Not part of any ship rule. The arm is compared with a base run from another day,
 0.78-1.40 across runs, so a pass is shown game by game before a draw is asked about:
 - the per-game mean difference (arm minus base) and how much of the total it carries;
 - leave-one-game-out: the registered stratified permutation test rerun with each game dropped in turn;
-- why games ended (`end_reason`, written from feat/fail-loud-telemetry on; older runs show "-").
+- why games ended (`end_reason`, written from feat/fail-loud-telemetry on; older runs show "-");
+- with `--arm` given more than once (C207: F + F2), the runs are pooled and every number above is for the pool,
+  plus the harm guard as a rate (games with >= 1 level per run).
 
 The runs are loaded and checked with scripts/read_arm.py's `load_run` (same stops: missing benchmark.json, wrong
 game count, a manifest naming another arm, a missing score, a crashed game).
 
-Usage: python -I scripts/robustness_check.py --arm RUN_DIR --arm-mechanisms all-nocont-fbx-img --base RUN_DIR
+Usage: python -I scripts/robustness_check.py --arm RUN_DIR [--arm RUN_DIR ...] --arm-mechanisms all-nocont-fbx-img --base RUN_DIR
        [--base-mechanisms base] [--games 30] [--draws 20000] [--seed 20261029] [--alpha 0.025] [--crashes-reviewed]
 """
 from __future__ import annotations
@@ -45,7 +47,7 @@ def leave_one_out(arm: list[dict], base: list[dict], draws: int, seed: int) -> d
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--arm", type=Path, required=True)
+    ap.add_argument("--arm", type=Path, action="append", required=True, help="repeat to pool replicate runs")
     ap.add_argument("--arm-mechanisms", required=True)
     ap.add_argument("--base", type=Path, required=True)
     ap.add_argument("--base-mechanisms", default="base")
@@ -56,11 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--crashes-reviewed", action="store_true")
     a = ap.parse_args(argv)
     try:
-        arm = read_arm.load_run(a.arm, a.arm_mechanisms, a.games, a.crashes_reviewed)
+        arm = [r for run in a.arm for r in read_arm.load_run(run, a.arm_mechanisms, a.games, a.crashes_reviewed)]
         base = read_arm.load_run(a.base, a.base_mechanisms, a.games, a.crashes_reviewed)
     except read_arm.RunCheckError as exc:
         print(f"RUN CHECK FAILED: {exc}", file=sys.stderr)
         return 1
+    for label, runs in (("arm", arm), ("base", base)):
+        cleared = sum(1 for r in runs if (r.get("levels_completed") or 0) >= 1)
+        print(f"{label}: {len(runs)} runs, mean {statistics.mean(float(r['final_score']) for r in runs):.3f}, "
+              f"games with >= 1 level {cleared}/{len(runs)} ({cleared / len(runs):.0%})")
     ma, mb = per_game_means(arm), per_game_means(base)
     deltas = {g: ma[g] - mb.get(g, 0.0) for g in sorted(ma)}
     gain = sum(d for d in deltas.values() if d > 0)
