@@ -72,6 +72,7 @@ class AgentConfig:
     multimodal_context: str
     multimodal_upscale: int
     mechanisms: str = "base"
+    image_tokens: int = 0  # LOCAL_ANALYZER_IMAGE_TOKENS: 0 keeps the base64/3 estimate (every arm up to C204)
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -95,6 +96,7 @@ class AgentConfig:
             multimodal_context=_env("MULTIMODAL_CONTEXT", "current_grid"),
             multimodal_upscale=_env_num("MULTIMODAL_UPSCALE", 4, int),
             mechanisms=mechanisms_from_env(),
+            image_tokens=_env_num("LOCAL_ANALYZER_IMAGE_TOKENS", 0, int),
         )
 
     @property
@@ -319,9 +321,28 @@ def extract_notes(text: str) -> dict[str, str]:
     return notes
 
 
-def estimate_tokens(messages: list[dict[str, Any]]) -> float:
+def estimate_tokens(messages: list[dict[str, Any]], image_tokens: int = 0) -> float:
+    """Characters/3 of the request payload. With `image_tokens` > 0 (LOCAL_ANALYZER_IMAGE_TOKENS) each image part
+    counts that many tokens instead of its base64 text/3: a board's ~1,440 base64 characters were estimated at
+    ~480 tokens, where the model was charged ~170 (C201-C204 logs), so kept images trimmed text history early."""
+    images = 0
+    if image_tokens > 0:
+        messages, images = _without_image_data(messages)
     payload = {"messages": messages, "tools": TOOLS, "tool_choice": TOOL_CHOICE}
-    return len(json.dumps(payload, sort_keys=True, ensure_ascii=True)) / 3
+    return len(json.dumps(payload, sort_keys=True, ensure_ascii=True)) / 3 + images * image_tokens
+
+
+def _without_image_data(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Copies with every image part's URL emptied, and the number of image parts."""
+    out, images = [], 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(part.get("type") == "image_url" for part in content):
+            images += sum(1 for part in content if part.get("type") == "image_url")
+            message = {**message, "content": [{"type": "image_url", "image_url": {"url": ""}}
+                                              if part.get("type") == "image_url" else part for part in content]}
+        out.append(message)
+    return out, images
 
 
 def drop_oldest_block(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -350,20 +371,21 @@ def _user_first(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return history[start:]
 
 
-def trim_messages(messages: list[dict[str, Any]], budget: float) -> list[dict[str, Any]]:
+def trim_messages(messages: list[dict[str, Any]], budget: float, image_tokens: int = 0) -> list[dict[str, Any]]:
     """Drop oldest history blocks until under budget, then start history at a user message."""
     system, history = messages[0], list(messages[1:])
-    while len(history) > 1 and estimate_tokens([system, *history]) > budget:
+    while len(history) > 1 and estimate_tokens([system, *history], image_tokens) > budget:
         history = drop_oldest_block(history)
     return [system, *_user_first(history)]
 
 
-def persistable_history(messages: list[dict[str, Any]], budget: float | None = None) -> list[dict[str, Any]]:
+def persistable_history(messages: list[dict[str, Any]], budget: float | None = None,
+                        image_tokens: int = 0) -> list[dict[str, Any]]:
     """History to keep after a turn: trimmed to the budget, no system, the last 30 assistant
     messages. If the cut lands right after a user message, that message is kept too; otherwise
     leading messages are dropped up to the next user message."""
     if budget is not None and messages and messages[0].get("role") == "system":
-        messages = trim_messages(messages, budget)
+        messages = trim_messages(messages, budget, image_tokens)
     history = [m for m in messages if m.get("role") != "system"]
     assistant_positions = [i for i, m in enumerate(history) if m.get("role") == "assistant"]
     if len(assistant_positions) > MAX_PERSISTED_ASSISTANT:
@@ -711,7 +733,7 @@ class ToolAgent:
             try:
                 return self.send(messages, timeout), messages
             except ContextLengthError:
-                trimmed = trim_messages(messages, self.config.budget - SAFETY_TOKENS)
+                trimmed = trim_messages(messages, self.config.budget - SAFETY_TOKENS, self.config.image_tokens)
                 if len(trimmed) == len(messages):
                     trimmed = [messages[0], *_user_first(drop_oldest_block(messages[1:]))]
                 if len(trimmed) == len(messages):
@@ -808,7 +830,8 @@ class ToolAgent:
         self._log(transcript, "USER PROMPT", text)
 
         system = {"role": "system", "content": self.system_prompt}
-        messages = trim_messages([system, *self.history, {"role": "user", "content": content}], self.config.budget)
+        messages = trim_messages([system, *self.history, {"role": "user", "content": content}], self.config.budget,
+                                 self.config.image_tokens)
         ctx = _TurnContext(valid_actions=valid_actions, step_env=step_env, state_path=state_path)
         reasoning_seen: list[str] = []
 
@@ -829,8 +852,10 @@ class ToolAgent:
                 return self._finish_turn(messages, ctx, reasoning_seen, transcript, yielded="tool_step_limit")
             timeout = request_timeout() if callable(request_timeout) else request_timeout
             before_trim = len(messages)
-            messages = trim_messages(messages, self.config.budget)
+            messages = trim_messages(messages, self.config.budget, self.config.image_tokens)
             self._request_counter += 1
+            if self.gate is not None:
+                self.gate.request = self._request_counter
             self._snapshot(state_path, step, self._request_counter, messages)
             sent = len(messages)
             request_started = time.time()
@@ -928,7 +953,7 @@ class ToolAgent:
     def _finish_turn(self, messages, ctx: _TurnContext, reasoning_seen, transcript, yielded: str | None = None,
                      persist: bool = True):
         if persist:
-            self.history = persistable_history(messages, self.config.budget)
+            self.history = persistable_history(messages, self.config.budget, self.config.image_tokens)
             if self.config.mechanisms in ELIDE_IMAGE_MECHANISMS:
                 # M4b: a user message loses its board image when it is kept, once; the live request carries the
                 # current board, and a message never changes after it is kept.
@@ -1097,7 +1122,8 @@ class ToolAgent:
         folder = Path(self.prompts_dir) / stem
         folder.mkdir(parents=True, exist_ok=True)
         record = {"step": step, "request": request_index, "message_count": len(messages),
-                  "estimated_tokens": round(estimate_tokens(messages)), "messages": _elide_images(messages)}
+                  "estimated_tokens": round(estimate_tokens(messages, self.config.image_tokens)),
+                  "messages": _elide_images(messages)}
         (folder / f"step_{step:04d}_r{request_index:05d}.json").write_text(json.dumps(record, indent=1),
                                                                           encoding="utf-8")
 
@@ -1114,7 +1140,7 @@ class ToolAgent:
             "request": self._request_counter, "turn_request": turn_request,
             "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
             "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
-            "estimated_tokens": round(estimate_tokens(final)), "message_count": len(final),
+            "estimated_tokens": round(estimate_tokens(final, self.config.image_tokens)), "message_count": len(final),
             "trimmed": (before_trim - sent) + (sent - len(final)), "finish_reason": reply.get("finish_reason"),
         }
         if error is not None:

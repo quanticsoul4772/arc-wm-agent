@@ -266,6 +266,9 @@ class WorldModelGate:
     confirmed: bool = False
     mechanisms: str = "base"
     game_class: str | None = None
+    # The agent's per-game request counter while a reply's tool cell runs: each log row carries it, so it joins
+    # the row of <stem>_requests.jsonl (and the prompt snapshot) of the request whose reply caused it.
+    request: int | None = None
     # Outcome of the last after_cell: None when no predict was captured, else the verdict dict
     # (with "passed"); read by the agent to tell the model what happened to its predict.
     last_verdict: dict[str, Any] | None = None
@@ -354,6 +357,8 @@ class WorldModelGate:
         if self.log_path is None:
             return
         record = {"t": time.time(), "event": event, "game_class": self.game_class, **fields}
+        if self.request is not None:
+            record["request"] = self.request
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 

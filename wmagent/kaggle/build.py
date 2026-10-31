@@ -61,6 +61,7 @@ def agent_env(a: argparse.Namespace) -> dict[str, str]:
         "PROBE_ENFORCE": str(a.probe_enforce), "PROBE_ACTIONS": str(a.probe_actions),
         "PROBE_MAX_REFUSALS": str(a.probe_max_refusals), "PROBE_RELEASE_AFTER_ACCEPT": str(a.probe_release_after_accept),
         "PROBE_OPTIONAL": str(a.probe_optional), "WM_MECHANISMS": a.wm_mechanisms or "base",
+        "LOCAL_ANALYZER_IMAGE_TOKENS": str(a.image_tokens),
     })
     return env
 
@@ -202,6 +203,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
+    ap.add_argument("--image-tokens", type=int, default=0,
+                    help="tokens the context estimate charges per image part (0: its base64 text/3, as up to C204)")
     ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img"], default=None,
                     help="Plan C arm: base (as before), m1a (capture-on-deny + stated rule), all, all-nocont (all without "
                     "the yield-continuation prompt), all-nocont-fb (all-nocont plus the verdict after every cell "

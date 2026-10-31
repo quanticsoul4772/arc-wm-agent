@@ -108,6 +108,12 @@ class SessionCrashed(RuntimeError):
     """The agent returned no result for a turn, or its requests kept failing."""
 
 
+class HostFailure(RuntimeError):
+    """The engine action ran but the host failed after it (state file, events sidecar). The game cannot be
+    trusted to continue (the gate's count and the state file would disagree with the engine), so this crashes it
+    instead of reaching the model as an action error."""
+
+
 class _EngineFailure(Exception):
     """game.execute raised; step_env turns it into an error payload (spec 2.3). Host-side failures after a
     successful execute (state file, events) are not caught as engine failures."""
@@ -261,7 +267,8 @@ class GameSession:
                           f"at analysis step {self.analysis_step}: {error}", flush=True)
                     if failures >= MAX_REQUEST_FAILURES:
                         raise SessionCrashed(f"{failures} request failures in a row; last: {error}")
-                    self.sleep(min(REQUEST_BACKOFF_MAX_S, 2.0 ** (failures - 1)))
+                    if not self.should_stop():  # no back-off past the cap (the cap's own timeout lands here)
+                        self.sleep(min(REQUEST_BACKOFF_MAX_S, 2.0 ** (failures - 1)))
                     continue
                 failures = 0
                 if result.get("yielded_control"):
@@ -278,9 +285,11 @@ class GameSession:
             if not self.game.solver_note:
                 self.game.solver_note = f"tokens={self.agent.generated_tokens}"
             self.game.end_reason = reason
-            self.game.finish(self._take_tokens())
-            self.state_path.unlink(missing_ok=True)
-            self._append_end_event(reason)
+            try:
+                self.game.finish(self._take_tokens())
+            finally:
+                self.state_path.unlink(missing_ok=True)
+                self._append_end_event(reason)
 
     def _name(self) -> str:
         return getattr(self.game, "label", "") or self.game.game_id
@@ -440,6 +449,13 @@ class GameSession:
             self.game.execute(request.action, request.data, generated_tokens=tokens)
         except Exception as exc:  # any engine failure is reported to the model (spec 2.3)
             raise _EngineFailure(f"{type(exc).__name__}: {exc}") from exc
+        try:
+            return self._after_execute(request, before_grid, before_levels, batch_index, batch_size)
+        except Exception as exc:
+            raise HostFailure(f"after {request.display} ran: {type(exc).__name__}: {exc}") from exc
+
+    def _after_execute(self, request: _Request, before_grid: list[list[int]], before_levels: int, batch_index: int,
+                       batch_size: int) -> dict[str, Any]:
         observation = self.game.frame
         self.last_engine_action = request.action
         self.action_count += 1

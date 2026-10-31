@@ -17,7 +17,7 @@ from tests.test_session import FakeClock, FakeGame, StubAgent, _session
 from wmagent import engine as eng
 from wmagent.engine import COMPETITION, Engine
 from wmagent.runner import PlayContext, Runner
-from wmagent.session import MAX_REQUEST_FAILURES, GameSession, SessionCrashed
+from wmagent.session import MAX_REQUEST_FAILURES, GameSession, HostFailure, SessionCrashed
 
 
 def _bare_session(tmp_path, game, agent, **kw) -> GameSession:
@@ -108,16 +108,103 @@ def test_an_engine_failure_is_an_error_payload_and_printed(tmp_path, capsys):
     assert "[session] fake-0001 engine error: UP failed in the engine" in capsys.readouterr().out
 
 
-def test_a_host_failure_after_the_action_ran_is_not_called_an_engine_error(tmp_path, monkeypatch):
+def test_a_host_failure_after_the_action_ran_is_a_host_failure(tmp_path, monkeypatch):
     session = _session(tmp_path)
 
     def broken(record, grid):
         raise OSError("No space left on device")
 
     monkeypatch.setattr(session, "_append_event", broken)
-    with pytest.raises(OSError, match="No space left"):
+    with pytest.raises(HostFailure, match="after UP ran: OSError: No space left on device"):
         session.step_env({"action": "UP"})
     assert len(session.game.calls) == 1  # the action itself ran
+
+
+def test_a_host_failure_crashes_the_game_through_the_turn_loop(tmp_path, monkeypatch):
+    game = FakeGame()
+    session = _bare_session(tmp_path, game, StubAgent(lambda i, c: c["step_env"]({"action": "UP"})))
+    real = session._write_state
+    calls = []
+
+    def broken():
+        calls.append(1)
+        if len(calls) > 1:  # the seed's write works, the first action's does not
+            raise OSError("disk full")
+        real()
+
+    monkeypatch.setattr(session, "_write_state", broken)
+    with pytest.raises(HostFailure):
+        session.run()
+    assert game.state == "crashed" and "HostFailure: after UP ran: OSError: disk full" in game.solver_note
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the sandbox needs POSIX process groups and rlimits")
+def test_a_host_failure_is_not_shown_to_the_model_code():
+    from tests.test_sandbox import _run
+
+    def handler(actions):
+        raise HostFailure("after UP ran: OSError: disk full")
+
+    with pytest.raises(HostFailure):
+        _run("try:\n    action('UP')\nexcept RuntimeError:\n    print('caught')", action_handler=handler)
+
+
+def test_gate_rows_carry_the_request_number(tmp_path):
+    from tests.fake_openai import FakeOpenAIServer, error_response, tool_call_response
+    from tests.test_agent import FakeGame as AgentGame
+    from tests.test_agent import _analyze
+    from tests.test_plan_c_step4b import _agent
+    from wmagent.world_model_gate import WorldModelGate
+
+    game = AgentGame(tmp_path)
+    gate = WorldModelGate(probe_actions=1, max_refusals=8, mechanisms="all-nocont-fbx")
+    script = [tool_call_response('print("look")'), tool_call_response('action(["UP", "UP"])'),
+              error_response(503, "stop")]
+    with FakeOpenAIServer(script) as server:
+        _analyze(_agent(server, gate=gate, mechanisms="all-nocont-fbx"), game, 1)
+    rows = [json.loads(x) for x in (game.state_path.parent / "g1_p0_wm_gate.jsonl").read_text().splitlines()]
+    assert rows[0]["event"] == "session_start" and "request" not in rows[0]
+    later = rows[1:]
+    assert later and all(r["request"] == 2 for r in later), later
+
+
+def test_wait_healthy_prints_progress_and_install_has_a_timeout(tmp_path, capsys, monkeypatch):
+    import subprocess as sp
+    from types import SimpleNamespace
+
+    from wmagent.kaggle import setup_vllm
+
+    log = tmp_path / "server.log"
+    log.write_text("loading weights 40%\n")
+    handle = SimpleNamespace(proc=SimpleNamespace(poll=lambda: None), base_url="http://127.0.0.1:9", log_path=log)
+    with pytest.raises(TimeoutError):
+        setup_vllm.wait_healthy(handle, timeout_s=0.35, poll_s=0.05, progress_s=0.1)
+    out = capsys.readouterr().out
+    assert "[setup_vllm] waiting for the server:" in out and "last log line: loading weights 40%" in out
+    seen = {}
+    monkeypatch.setattr(setup_vllm.subprocess, "run", lambda cmd, **kw: seen.update(kw) or sp.CompletedProcess(cmd, 0))
+    (tmp_path / "wh").mkdir()
+    (tmp_path / "site").mkdir()  # pip would create it
+    setup_vllm.install_wheelhouse(tmp_path / "wh", tmp_path / "site")
+    assert seen["timeout"] == setup_vllm.INSTALL_TIMEOUT_S and seen["check"] is True
+
+
+def test_watchdog_prints_the_exit_code_and_log_tail(tmp_path, capsys):
+    import time as _time
+    from types import SimpleNamespace
+
+    from wmagent.kaggle import setup_vllm
+
+    log = tmp_path / "server.log"
+    log.write_text("CUDA out of memory\n")
+    handle = SimpleNamespace(proc=SimpleNamespace(poll=lambda: -9), log_path=log, torn_down=False)
+    setup_vllm.start_watchdog(handle, poll_s=0.01, gpu_s=999).join(timeout=5)
+    out = capsys.readouterr().out
+    assert "model server exited with code -9 during the run" in out and "CUDA out of memory" in out
+    quiet = SimpleNamespace(proc=SimpleNamespace(poll=lambda: 0), log_path=log, torn_down=True)
+    setup_vllm.start_watchdog(quiet, poll_s=0.01).join(timeout=5)
+    _time.sleep(0.05)
+    assert "exited" not in capsys.readouterr().out  # a teardown is not reported as a death
 
 
 # --------------------------------------------------------------- runner
@@ -132,7 +219,7 @@ def test_a_game_crash_prints_its_traceback(tmp_path, capsys):
     assert len(crashed) == 1 and crashed[0].end_reason == "crash"
     captured = capsys.readouterr()
     assert "[runner] g1-00000001_p0 crashed: KeyError: 'level'" in captured.out
-    assert "Traceback (most recent call last)" in captured.err and "KeyError: 'level'" in captured.err
+    assert "Traceback (most recent call last)" in captured.out and "KeyError: 'level'" in captured.out
 
 
 def _failing_ready() -> None:
@@ -147,7 +234,7 @@ def test_a_run_level_error_fails_an_offline_run_after_writing_results(tmp_path, 
     notes = {g["solver_note"] for g in data["game_runs"]}
     assert notes == {"error: RuntimeError: vLLM exited with code 1 (the run failed before this game ended)"}
     assert {g["end_reason"] for g in data["game_runs"]} == {"teardown"}
-    assert "Traceback (most recent call last)" in capsys.readouterr().err
+    assert "Traceback (most recent call last)" in capsys.readouterr().out
 
 
 def test_a_run_level_error_in_submission_mode_still_closes_and_names_the_error(tmp_path):
@@ -214,4 +301,29 @@ def test_a_host_handler_bug_is_printed_and_still_reported_to_the_model(capsys):
     assert "model saw AttributeError" in out["stdout"]
     captured = capsys.readouterr()
     assert "[sandbox] action handler raised (reported to the model): AttributeError" in captured.out
-    assert "Traceback (most recent call last)" in captured.err
+    assert "Traceback (most recent call last)" in captured.out
+
+
+def test_no_back_off_once_the_cap_is_reached(tmp_path):
+    sleeps: list[float] = []
+    clock = FakeClock()
+
+    def script(i, call):
+        clock.now += 300.0  # the request ran into the cap (its timeout is the time left)
+        return {"retryable_failure": True, "error": "request failed: ReadTimeout"}
+
+    game = FakeGame()
+    _bare_session(tmp_path, game, StubAgent(script), time_cap_s=250.0, clock=clock, sleep=sleeps.append).run()
+    assert sleeps == [] and game.end_reason == "time_cap"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the sandbox needs POSIX process groups and rlimits")
+def test_a_cell_looping_on_a_failing_handler_prints_three_times(capsys):
+    from tests.test_sandbox import _run
+
+    def handler(actions):
+        raise AttributeError("boom")
+
+    code = "for _ in range(6):\n    try:\n        action('UP')\n    except RuntimeError:\n        pass"
+    _run(code, action_handler=handler)
+    assert capsys.readouterr().out.count("[sandbox] action handler raised") == 3
