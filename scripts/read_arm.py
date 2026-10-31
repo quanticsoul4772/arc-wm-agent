@@ -87,12 +87,16 @@ def permutation_p(arm: list[dict], base: list[dict], draws: int, seed: int) -> t
 
 
 def call_economy(run_dir: Path) -> dict:
-    """Calls per game and mean generated tokens per call, split by turn type (new step, after a yield, mid-turn)."""
+    """Calls per game and mean generated tokens per call, split by turn type (new step, after a yield, mid-turn);
+    failed requests (rows with `error`) are counted apart."""
     kinds: dict[str, list[int]] = defaultdict(list)
     files = sorted((run_dir / "artifacts").glob("*_requests.jsonl"))
     for path in files:
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
         for i, row in enumerate(rows):
+            if row.get("error"):
+                kinds["failed"].append(0)  # a request that failed or was cut at the cap: no usage
+                continue
             if row["turn_request"] != 1:
                 kind = "mid_turn"
             elif i and rows[i - 1]["step"] == row["step"]:

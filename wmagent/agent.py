@@ -809,7 +809,13 @@ class ToolAgent:
             self._snapshot(state_path, step, self._request_counter, messages)
             sent = len(messages)
             request_started = time.time()
-            reply, messages = self._request_with_trim(messages, timeout)
+            try:
+                reply, messages = self._request_with_trim(messages, timeout)
+            except AnalyzerRequestError as exc:
+                # the failed request gets its row too (re-raised: analyze() reverts the turn and reports it)
+                self._log_request(state_path, step, requests_made + 1, request_started, before_trim, sent, messages,
+                                  {}, error=f"{type(exc).__name__}: {exc}")
+                raise
             requests_made += 1
             if self.gate is not None:
                 self.gate.note_model_call()  # M1d release valve (WM_MECHANISMS=all only)
@@ -1066,10 +1072,11 @@ class ToolAgent:
                                                                           encoding="utf-8")
 
     def _log_request(self, state_path: Path, step: int, turn_request: int, started: float, before_trim: int,
-                     sent: int, final: list[dict[str, Any]], reply: dict[str, Any]) -> None:
+                     sent: int, final: list[dict[str, Any]], reply: dict[str, Any], error: str | None = None) -> None:
         """M4a context monitor: one row per chat request in <stem>_requests.jsonl next to the state file
         (logging only). `trimmed` counts messages dropped by the budget trim before the request and by the
-        context-length retry; cached tokens need the server's --enable-prompt-tokens-details (null when 0)."""
+        context-length retry; cached tokens need the server's --enable-prompt-tokens-details (null when 0).
+        A request that failed has no usage and carries `error`."""
         usage = reply.get("usage") or {}
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
         row = {
@@ -1080,6 +1087,8 @@ class ToolAgent:
             "estimated_tokens": round(estimate_tokens(final)), "message_count": len(final),
             "trimmed": (before_trim - sent) + (sent - len(final)), "finish_reason": reply.get("finish_reason"),
         }
+        if error is not None:
+            row["error"] = error[:300]
         path = state_path.with_name(f"{stem}_requests.jsonl")
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")

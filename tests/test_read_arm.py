@@ -23,7 +23,8 @@ def _run(tmp_path, name, mechanisms, scores, states=None, levels=None):
         (run / "artifacts" / f"{gid}_p{i}_wm_gate.jsonl").write_text(json.dumps(start) + "\n")
         rows = [{"step": 1, "turn_request": 1, "completion_tokens": 100},
                 {"step": 1, "turn_request": 2, "completion_tokens": 50},
-                {"step": 1, "turn_request": 1, "completion_tokens": 300}]
+                {"step": 1, "turn_request": 1, "completion_tokens": 300},
+                {"step": 2, "turn_request": 1, "completion_tokens": None, "error": "AnalyzerRequestError: timeout"}]
         (run / "artifacts" / f"{gid}_p{i}_requests.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
     (run / "benchmark.json").write_text(json.dumps({"game_runs": game_runs}))
     return run
@@ -41,6 +42,7 @@ def test_a_clear_gain_ships_and_the_economy_is_split_by_turn_type(tmp_path, caps
     out = capsys.readouterr().out
     assert "T +3.000" in out and "games with >= 1 level: arm 4  base 0" in out
     assert "after_yield_tokens': 300" in out and "new_step_tokens': 100" in out and "mid_turn_tokens': 50" in out
+    assert "failed_calls': 4" in out
 
 
 def test_a_loss_is_no_ship(tmp_path, capsys):
