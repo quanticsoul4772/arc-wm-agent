@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import statistics
 import sys
 from collections import Counter, defaultdict
@@ -26,6 +27,18 @@ from pathlib import Path
 _spec = importlib.util.spec_from_file_location("read_arm", Path(__file__).resolve().parent / "read_arm.py")
 read_arm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(read_arm)
+
+
+GATE_SETTINGS = ("mechanisms", "probe_actions", "max_refusals", "optional", "release_after_accept")
+
+
+def gate_settings(run_dir: Path) -> set[tuple]:
+    """The distinct gate settings in a run's session_start manifests (one per game)."""
+    out = set()
+    for log in (run_dir / "artifacts").glob("*_wm_gate.jsonl"):
+        start = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        out.add(tuple(start.get(k) for k in GATE_SETTINGS))
+    return out
 
 
 def per_game_means(runs: list[dict]) -> dict[str, float]:
@@ -62,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         base = read_arm.load_run(a.base, a.base_mechanisms, a.games, a.crashes_reviewed)
     except read_arm.RunCheckError as exc:
         print(f"RUN CHECK FAILED: {exc}", file=sys.stderr)
+        return 1
+    settings = set().union(*(gate_settings(run) for run in a.arm))
+    if len(settings) != 1:  # e.g. F and H share the arm name but not the probe budget
+        print(f"RUN CHECK FAILED: pooled runs differ in gate settings {GATE_SETTINGS}: {sorted(settings, key=str)}",
+              file=sys.stderr)
         return 1
     for label, runs in (("arm", arm), ("base", base)):
         cleared = sum(1 for r in runs if (r.get("levels_completed") or 0) >= 1)
