@@ -215,3 +215,28 @@ def test_a_host_handler_bug_is_printed_and_still_reported_to_the_model(capsys):
     captured = capsys.readouterr()
     assert "[sandbox] action handler raised (reported to the model): AttributeError" in captured.out
     assert "Traceback (most recent call last)" in captured.err
+
+
+def test_no_back_off_once_the_cap_is_reached(tmp_path):
+    sleeps: list[float] = []
+    clock = FakeClock()
+
+    def script(i, call):
+        clock.now += 300.0  # the request ran into the cap (its timeout is the time left)
+        return {"retryable_failure": True, "error": "request failed: ReadTimeout"}
+
+    game = FakeGame()
+    _bare_session(tmp_path, game, StubAgent(script), time_cap_s=250.0, clock=clock, sleep=sleeps.append).run()
+    assert sleeps == [] and game.end_reason == "time_cap"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the sandbox needs POSIX process groups and rlimits")
+def test_a_cell_looping_on_a_failing_handler_prints_three_times(capsys):
+    from tests.test_sandbox import _run
+
+    def handler(actions):
+        raise AttributeError("boom")
+
+    code = "for _ in range(6):\n    try:\n        action('UP')\n    except RuntimeError:\n        pass"
+    _run(code, action_handler=handler)
+    assert capsys.readouterr().out.count("[sandbox] action handler raised") == 3

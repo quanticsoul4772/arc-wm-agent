@@ -261,7 +261,8 @@ class GameSession:
                           f"at analysis step {self.analysis_step}: {error}", flush=True)
                     if failures >= MAX_REQUEST_FAILURES:
                         raise SessionCrashed(f"{failures} request failures in a row; last: {error}")
-                    self.sleep(min(REQUEST_BACKOFF_MAX_S, 2.0 ** (failures - 1)))
+                    if not self.should_stop():  # no back-off past the cap (the cap's own timeout lands here)
+                        self.sleep(min(REQUEST_BACKOFF_MAX_S, 2.0 ** (failures - 1)))
                     continue
                 failures = 0
                 if result.get("yielded_control"):
@@ -278,9 +279,11 @@ class GameSession:
             if not self.game.solver_note:
                 self.game.solver_note = f"tokens={self.agent.generated_tokens}"
             self.game.end_reason = reason
-            self.game.finish(self._take_tokens())
-            self.state_path.unlink(missing_ok=True)
-            self._append_end_event(reason)
+            try:
+                self.game.finish(self._take_tokens())
+            finally:
+                self.state_path.unlink(missing_ok=True)
+                self._append_end_event(reason)
 
     def _name(self) -> str:
         return getattr(self.game, "label", "") or self.game.game_id

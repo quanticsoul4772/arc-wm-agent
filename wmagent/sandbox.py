@@ -158,6 +158,7 @@ def run_sandboxed_python(
     from wmagent.segmentation import ASCII_ALPHABET
 
     action_results: list[Any] = []
+    handler_errors_printed = [0]
     owned_dir = None
     if sandbox_cwd is None:
         owned_dir = tempfile.mkdtemp(prefix="wm_sandbox_")
@@ -221,7 +222,7 @@ def run_sandboxed_python(
             except (ValueError, KeyError, TypeError):
                 return failure("Sandbox returned an invalid response.")
             if kind == "action":
-                reply = _handle_action(action_handler, message.get("actions"), action_results)
+                reply = _handle_action(action_handler, message.get("actions"), action_results, handler_errors_printed)
                 try:
                     send(reply)
                 except (BrokenPipeError, OSError):
@@ -253,10 +254,14 @@ def run_sandboxed_python(
             shutil.rmtree(owned_dir, ignore_errors=True)
 
 
+HANDLER_ERRORS_PRINTED_PER_CELL = 3
+
+
 def _handle_action(
     handler: Callable[[list[dict[str, Any]]], dict[str, Any]] | None,
     actions: Any,
     action_results: list[Any],
+    printed: list[int],
 ) -> dict[str, Any]:
     if handler is None:
         return {"type": "action_error", "error": "action() is not available in this sandbox."}
@@ -265,11 +270,15 @@ def _handle_action(
     except ActionRefused as exc:
         return {"type": "action_error", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - reported to the model's code (bad model input lands here too)
-        # ...and printed with its traceback, so a host bug behind it does not pass as the model's mistake
-        import traceback
+        # ...and printed with its traceback, so a host bug behind it does not pass as the model's mistake; a cell
+        # that loops on the same failing call prints the first few only
+        printed[0] += 1
+        if printed[0] <= HANDLER_ERRORS_PRINTED_PER_CELL:
+            import traceback
 
-        print(f"[sandbox] action handler raised (reported to the model): {type(exc).__name__}: {exc}", flush=True)
-        traceback.print_exc()
+            print(f"[sandbox] action handler raised (reported to the model): {type(exc).__name__}: {exc}",
+                  flush=True)
+            traceback.print_exc()
         return {"type": "action_error", "error": f"{type(exc).__name__}: {exc}"}
     reply = reply if isinstance(reply, dict) else {}
     action_result = reply.get("action_result")

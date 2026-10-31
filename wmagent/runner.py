@@ -250,8 +250,8 @@ class Runner:
         heartbeat = threading.Thread(target=self._heartbeat, args=(heartbeat_stop, n_passes), daemon=True)
         heartbeat.start()
         error: Exception | None = None
-        self._write_run_config()
         try:
+            self._write_run_config()
             self._start_all(runs)
             if ready is not None:
                 self._wait_ready(ready)
