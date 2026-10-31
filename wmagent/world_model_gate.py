@@ -33,6 +33,7 @@ Every decision is appended to <run_stem>_wm_gate.jsonl next to the run's state f
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import os
 import re
@@ -58,10 +59,12 @@ HELDOUT_PASS_HITS = 3
 # WM_MECHANISMS (Plan C arms): "base" is the harness as it was, "m1a" adds capture-on-deny and the
 # stated acceptance rule, "all" adds every Plan C mechanism, "all-nocont" is "all" without the yield-continuation
 # prompt (M2c; arm C slowed down on it, C201), "all-nocont-fb" is "all-nocont" plus the verdict after every cell
-# that defines predict, with the backtest error and a wrong board shape spelled out. Read only in from_env /
-# AgentConfig.from_env.
-MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb")
-FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb")
+# that defines predict, with the backtest error and a wrong board shape spelled out, "all-nocont-fbx" is
+# "all-nocont-fb" plus four fixes from the C200 logs: a rejected action costs no probe, a release is announced,
+# traceback line numbers point into the model's own cell, and capture keeps only self-contained constants.
+# Read only in from_env / AgentConfig.from_env.
+MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
+FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
 
 
 def mechanisms_from_env() -> str:
@@ -97,9 +100,42 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def extract_definitions(code: str) -> dict[str, str] | None:
+def _bound_names(node: ast.AST) -> set[str]:
+    """Names a top-level import, def, class or assignment binds."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    if isinstance(node, ast.Assign):
+        return {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return set()
+
+
+def _free_names(value: ast.AST) -> set[str]:
+    """Names an expression reads that it does not bind itself (comprehension variables are bound)."""
+    loads = {n.id for n in ast.walk(value) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    stores = {n.id for n in ast.walk(value) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    return loads - stores
+
+
+def stored_names(store: dict[str, str]) -> set[str]:
+    """Names the stored definitions bind (they run above every backtest)."""
+    names: set[str] = set()
+    for segment in store.values():
+        try:
+            names |= set().union(*(_bound_names(n) for n in ast.parse(segment).body))
+        except SyntaxError:
+            continue
+    return names
+
+
+def extract_definitions(code: str, self_contained: bool = False, known: set[str] | frozenset[str] = frozenset()
+                        ) -> dict[str, str] | None:
     """Top-level imports, defs, classes and constant assignments from a cell
-    that defines predict; None if the cell does not define predict."""
+    that defines predict; None if the cell does not define predict. With `self_contained` (all-nocont-fbx) a
+    constant is kept only if every name it reads is a builtin, in `known` (the stored definitions) or bound
+    earlier in the captured part of the cell: a constant built from lines the capture drops would make the
+    whole backtest fail with a NameError (all 29 backtest failures in C200's arms)."""
     if not PREDICT_PATTERN.search(code):
         return None
     try:
@@ -107,18 +143,24 @@ def extract_definitions(code: str) -> dict[str, str] | None:
     except SyntaxError:
         return None
     definitions: dict[str, str] = {}
+    bound = set(known) | set(dir(builtins))
     for node in tree.body:
         segment = ast.get_source_segment(code, node)
         if segment is None:
             continue
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
             definitions[node.name] = segment
+            bound |= _bound_names(node)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             definitions[f"import:{segment}"] = segment
+            bound |= _bound_names(node)
         elif (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)
               and not any(isinstance(n, ast.Call) for n in ast.walk(node.value))):
+            if self_contained and not _free_names(node.value) <= bound:
+                continue
             for target in node.targets:
                 definitions[f"const:{target.id}"] = segment
+            bound |= _bound_names(node)
     return definitions if "predict" in definitions else None
 
 
@@ -243,9 +285,15 @@ class WorldModelGate:
 
     @property
     def capture_feedback(self) -> bool:
-        """WM_MECHANISMS=all-nocont-fb: the verdict after every cell that defines predict, with the backtest
-        error and a wrong board shape spelled out."""
-        return self.mechanisms == "all-nocont-fb"
+        """WM_MECHANISMS=all-nocont-fb / fbx: the verdict after every cell that defines predict, with the
+        backtest error and a wrong board shape spelled out."""
+        return self.mechanisms in ("all-nocont-fb", "all-nocont-fbx")
+
+    @property
+    def fixes(self) -> bool:
+        """WM_MECHANISMS=all-nocont-fbx: rejected actions cost no probe, releases are announced, traceback lines
+        point into the model's cell, capture keeps only self-contained constants."""
+        return self.mechanisms == "all-nocont-fbx"
 
     @property
     def full(self) -> bool:
@@ -474,6 +522,14 @@ class WorldModelGate:
             return None
         return "World-model gate: action() is blocked on this level. " + self.evidence_line()
 
+    def released_note(self, level: int | None) -> str | None:
+        """all-nocont-fbx: while a level is released without an accepted predict (valve or refusal cap), the
+        next prompts say so; the system prompt says action() stays refused until predict is accepted."""
+        if not self.fixes or level != self.level or not self.released or self._model_ok():
+            return None
+        return ("World-model gate: action() is unblocked on this level: the gate released it without an "
+                "accepted predict. Play with action(...) now; a predict is not needed on this level.")
+
     def note_model_call(self) -> None:
         """M1d release valve: after `blocked_call_release` model calls on a blocked level with no accepted
         model, the level is released. It applies alongside the refusal cap; whichever comes first releases."""
@@ -543,7 +599,7 @@ class WorldModelGate:
             # M1c: the carried model is scored after every cell while the grant holds, whatever the cell did
             # (a cell that redefines predict would otherwise skip the revoke check for the whole level).
             self._track_grant(run_backtest(self.stored_source()))
-        captured = None if errored else extract_definitions(code)
+        captured = None if errored else extract_definitions(code, self.fixes, stored_names(self.store))
         if captured is not None:
             candidate = dict(self.store)
             candidate.update(captured)

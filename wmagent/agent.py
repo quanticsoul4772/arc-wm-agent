@@ -479,6 +479,18 @@ def latch_stub(latched: dict[str, Any], reason: str, requested: int) -> dict[str
     }
 
 
+_TOOL_LINE = re.compile(r'(File "<python_tool>", line )(\d+)')
+
+
+def _cell_line_numbers(error: str, offset: int) -> str:
+    """all-nocont-fbx: traceback line numbers counted from the model's own cell, not from the stored definitions
+    the gate runs above it (145 of 322 tracebacks in C200's arms pointed past the end of the cell)."""
+    def fix(m: re.Match) -> str:
+        line = int(m.group(2)) - offset
+        return f"{m.group(1)}{line}" if line > 0 else f"{m.group(1)}{m.group(2)} (in the stored definitions)"
+    return _TOOL_LINE.sub(fix, error)
+
+
 def executed_count_of(result: dict[str, Any]) -> int:
     if "executed_count" in result:
         return int(result.get("executed_count") or 0)
@@ -769,6 +781,7 @@ class ToolAgent:
         board_level = int(frame.get("level") or 1)
         extra = [
             self.gate.probe_line(board_level) if self.gate is not None else None,  # M4c
+            self.gate.released_note(board_level) if self.gate is not None else None,  # fbx: release announced
             self.progress.take_stuck_line() if self.progress is not None else None,  # M2b
             self.progress.memory_block() if self.progress is not None and not continuing else None,  # M4d
         ]
@@ -993,8 +1006,10 @@ class ToolAgent:
                 if len(frames) == len(displays) + 1:
                     self.progress.record(frames, displays, shadow_hits)
             if self.gate is not None:
-                # a failed call (error payload, no executed_count) counts 1, as in the original
-                self.gate.record_actions(int(result.get("executed_count", 1) or 0))
+                # a failed call (error payload, no executed_count) counts 1, as in the original; fbx counts
+                # only the actions that ran (a rejected ACTION7 cost up to 4 of 8 probes in C200's arms)
+                self.gate.record_actions(executed_count_of(payload) if self.gate.fixes
+                                         else int(result.get("executed_count", 1) or 0))
             executed = executed_count_of(payload)
             cell.results.append(result)
             if executed > 0:
@@ -1013,6 +1028,9 @@ class ToolAgent:
         to_run = self.gate.prepend(code) if self.gate is not None else code
         outcome = run_python(code=to_run, timeout_seconds=self.config.tool_timeout,
                              initial_state=self._state(ctx), action_handler=handle)
+        if self.gate is not None and self.gate.fixes and outcome.get("error") and to_run != code:
+            outcome = {**outcome, "error": _cell_line_numbers(str(outcome["error"]),
+                                                              to_run.count("\n") - code.count("\n"))}
         had_error = bool(outcome.get("error"))
         gate_note = None
         if self.gate is not None:
