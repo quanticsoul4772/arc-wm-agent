@@ -1016,7 +1016,7 @@ class ToolAgent:
             refusal_only = (self.gate.evaluate_on_deny and had_error and cell.refusal is not None
                             and str(outcome["error"]).rstrip().endswith("RuntimeError: " + cell.refusal))
             self.gate.after_cell(code, had_error and not refusal_only, lambda src: self._backtest(src, ctx))
-            if refusal_only:
+            if refusal_only or (self.gate.capture_feedback and self.gate.last_verdict is not None):
                 gate_note = self.gate.verdict_note()
             if self.progress is not None:
                 if cell.refusal is not None:
@@ -1148,4 +1148,6 @@ def format_tool_result(outcome: dict[str, Any], action_results: list[dict[str, A
     elif action_results:
         body["result"] = {"action_calls": len(action_results),
                           "last_action_result": _collapse_planned(action_results[-1])}
+    if gate_note:
+        body["gate"] = gate_note  # all-nocont-fb: the verdict on a cell that ran without an error
     return json.dumps(cut.finish(body, tokens), indent=2, default=str)

@@ -57,9 +57,11 @@ HELDOUT_PASS_HITS = 3
 
 # WM_MECHANISMS (Plan C arms): "base" is the harness as it was, "m1a" adds capture-on-deny and the
 # stated acceptance rule, "all" adds every Plan C mechanism, "all-nocont" is "all" without the yield-continuation
-# prompt (M2c; arm C slowed down on it, C201). Read only in from_env / AgentConfig.from_env.
-MECHANISMS = ("base", "m1a", "all", "all-nocont")
-FULL_MECHANISMS = ("all", "all-nocont")
+# prompt (M2c; arm C slowed down on it, C201), "all-nocont-fb" is "all-nocont" plus the verdict after every cell
+# that defines predict, with the backtest error and a wrong board shape spelled out. Read only in from_env /
+# AgentConfig.from_env.
+MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb")
+FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb")
 
 
 def mechanisms_from_env() -> str:
@@ -139,6 +141,10 @@ def _is_hit(changed: int, miss: int | None) -> bool:
     return miss <= max(MISS_TOLERANCE, 0.05 * changed) and miss < changed
 
 
+# all-nocont-fb: what a failed backtest's verdict adds, so the model can make its captured definitions run.
+BACKTEST_SCOPE = ("The backtest runs only the top-level imports, defs, classes and constant assignments of the cells "
+                  "that defined predict, so they cannot use names defined in other cells.")
+
 # Runs inside the restricted sandbox after the stored definitions.
 BACKTEST_DRIVER = r'''
 def __probe_mismatch(predicted, actual):
@@ -149,6 +155,13 @@ def __probe_mismatch(predicted, actual):
         count += abs(len(p_row) - len(a_row))
         count += sum(1 for p, a in zip(p_row, a_row) if p != a)
     return count
+
+def __probe_shape(predicted, actual):
+    p_rows = [row.strip() for row in str(predicted).strip().splitlines()]
+    a_rows = [row.strip() for row in str(actual).strip().splitlines()]
+    p_shape = [len(p_rows), max([len(r) for r in p_rows] or [0])]
+    a_shape = [len(a_rows), max([len(r) for r in a_rows] or [0])]
+    return None if p_shape == a_shape else p_shape + a_shape
 
 __probe_rows = []
 for __i, __t in enumerate(transitions):
@@ -164,12 +177,14 @@ for __i, __t in enumerate(transitions):
     try:
         __pred = predict(__t.before_frame.ascii, __t.action)
         __miss = __probe_mismatch(__pred, __t.after_frame.ascii)
+        __shape = __probe_shape(__pred, __t.after_frame.ascii)
         __err = None
     except Exception as __exc:
         __miss = None
+        __shape = None
         __err = type(__exc).__name__
     __probe_rows.append([__i, __changed, __miss, __err, __t.after_frame.level, str(__t.action)[:40],
-                         __t.before_frame.level])
+                         __t.before_frame.level, __shape])
 result = __probe_rows
 '''
 
@@ -207,6 +222,8 @@ class WorldModelGate:
     blocked_calls: int = 0
     deny_followup: dict[str, Any] | None = None
     submitted_predict: str | None = None
+    # all-nocont-fb: the last line of the last backtest's error, for the verdict the model is shown
+    backtest_error: str | None = None
 
     @classmethod
     def from_env(cls) -> WorldModelGate | None:
@@ -223,6 +240,12 @@ class WorldModelGate:
     @property
     def evaluate_on_deny(self) -> bool:
         return self.mechanisms != "base"
+
+    @property
+    def capture_feedback(self) -> bool:
+        """WM_MECHANISMS=all-nocont-fb: the verdict after every cell that defines predict, with the backtest
+        error and a wrong board shape spelled out."""
+        return self.mechanisms == "all-nocont-fb"
 
     @property
     def full(self) -> bool:
@@ -281,16 +304,37 @@ class WorldModelGate:
         if verdict["passed"]:
             return "World-model gate: your predict was accepted on this level; action() is unblocked."
         if verdict.get("reason") == "backtest_failed":
+            if self.capture_feedback:
+                return ("World-model gate: your predict was captured but its backtest failed to run: "
+                        f"{verdict.get('error') or 'no error text'}. {BACKTEST_SCOPE}")
             return "World-model gate: your predict was captured but its backtest failed to run."
-        return (
+        note = (
             f"World-model gate: your predict was captured but not accepted: it matched "
             f"{round(verdict['accuracy'] * verdict['informative'])} of {verdict['informative']} informative moves "
             f"(needs at least {self.profile.min_informative} moves that change more than "
             f"{self.profile.change_floor} cells, and at least {int(self.profile.pass_accuracy * 100)}% of them matched)."
         )
+        if self.capture_feedback and verdict.get("first_miss"):
+            note += " " + self._miss_sentence(verdict["first_miss"])
+        return note
+
+    @staticmethod
+    def _miss_sentence(miss: dict[str, Any]) -> str:
+        """all-nocont-fb: the first missed move, with a wrong board shape named as such."""
+        shape = miss.get("shape")
+        if miss["miss"] is None:
+            off = "raised an error"
+        elif shape:
+            off = (f"returned {shape[0]} line(s) up to {shape[1]} characters wide; the board is {shape[2]} lines "
+                   f"of {shape[3]}")
+        else:
+            off = f"was off by {miss['miss']} cells"
+        return f"First miss: {miss['action']} changed {miss['changed']} cells and predict {off}."
 
     def note_backtest_error(self, error: str) -> None:
         self._log("backtest_error", level=self.level, error=str(error)[:300])
+        lines = [line.strip() for line in str(error).strip().splitlines() if line.strip()]
+        self.backtest_error = lines[-1][:200] if lines else None
 
     def stored_source(self) -> str:
         return "\n\n".join(self.store.values())
@@ -400,11 +444,15 @@ class WorldModelGate:
         if v is None:
             return f"No predict has been judged on this level yet ({rule})."
         if v.get("reason") == "backtest_failed":
+            if self.capture_feedback and v.get("error"):
+                return f"Your last predict's backtest failed to run: {v['error']} ({rule})."[:250]
             return f"Your last predict's backtest failed to run ({rule})."
         line = (f"Your last predict matched {round(v['accuracy'] * v['informative'])} of {v['informative']} "
                 f"informative moves ({rule}).")
         miss = v.get("first_miss")
-        if miss:
+        if miss and self.capture_feedback:
+            line += " " + self._miss_sentence(miss)
+        elif miss:
             off = "raised an error" if miss["miss"] is None else f"was off by {miss['miss']} cells"
             line += f" First miss: {miss['action']} changed {miss['changed']} cells and predict {off}."
         return line[:250]
@@ -499,8 +547,11 @@ class WorldModelGate:
         if captured is not None:
             candidate = dict(self.store)
             candidate.update(captured)
+            self.backtest_error = None
             rows = run_backtest("\n\n".join(candidate.values()))
             verdict = self._judge(rows)
+            if rows is None and self.capture_feedback:
+                verdict["error"] = self.backtest_error
             self.last_verdict = verdict
             self.level_verdict = verdict
             self._log("captured", level=self.level, names=sorted(captured), **verdict)
@@ -576,7 +627,8 @@ class WorldModelGate:
         hits = [r for r in informative if _is_hit(r[1], r[2])]
         misses = [r for r in informative if not _is_hit(r[1], r[2])]
         first_miss = ({"transition": misses[0][0], "action": misses[0][5] if len(misses[0]) > 5 else "?",
-                       "changed": misses[0][1], "miss": misses[0][2]} if misses else None)
+                       "changed": misses[0][1], "miss": misses[0][2],
+                       "shape": misses[0][7] if len(misses[0]) > 7 else None} if misses else None)
         accuracy = len(hits) / len(informative) if informative else 0.0
         n_transitions = (max(r[0] for r in rows) + 1) if rows else 0
         return {
