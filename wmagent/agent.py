@@ -31,14 +31,20 @@ def _env(name: str, default: str) -> str:
 
 
 def _env_num(name: str, default: float, cast: Callable[[str], Any] = float) -> Any:
+    raw = _env(name, str(default))
     try:
-        return cast(_env(name, str(default)))
+        return cast(raw)
     except ValueError:
-        return cast(str(default))
+        raise ValueError(f"{name}={raw!r} is not a valid {cast.__name__}") from None
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    return _env(name, "1" if default else "0").lower() in {"1", "true", "yes", "y", "on"}
+    raw = _env(name, "1" if default else "0").lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name}={raw!r} is not a boolean (1/0, true/false, yes/no, on/off)")
 
 
 @dataclass(frozen=True)

@@ -94,10 +94,20 @@ SIMULATE_HELPER = '''def simulate(actions, ascii=None):
 
 
 def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
     try:
-        return int(os.environ.get(name, "").strip() or default)
+        return int(raw or default)
     except ValueError:
-        return default
+        raise ValueError(f"{name}={raw!r} is not an integer") from None
+
+
+def _env_flag(name: str) -> bool:
+    """Unset, "" or "0" is off, "1" is on; anything else is an error (PROBE_ENFORCE=true used to turn the gate
+    off without a word)."""
+    raw = os.environ.get(name, "").strip()
+    if raw in ("", "0", "1"):
+        return raw == "1"
+    raise ValueError(f"{name}={raw!r} must be 1 or 0")
 
 
 def _bound_names(node: ast.AST) -> set[str]:
@@ -269,13 +279,13 @@ class WorldModelGate:
 
     @classmethod
     def from_env(cls) -> WorldModelGate | None:
-        if os.environ.get("PROBE_ENFORCE", "").strip() != "1":
+        if not _env_flag("PROBE_ENFORCE"):
             return None
         return cls(
             probe_actions=_env_int("PROBE_ACTIONS", 30),
             max_refusals=_env_int("PROBE_MAX_REFUSALS", 8),
-            release_after_accept=os.environ.get("PROBE_RELEASE_AFTER_ACCEPT", "").strip() == "1",
-            optional=os.environ.get("PROBE_OPTIONAL", "").strip() == "1",
+            release_after_accept=_env_flag("PROBE_RELEASE_AFTER_ACCEPT"),
+            optional=_env_flag("PROBE_OPTIONAL"),
             mechanisms=mechanisms_from_env(),
         )
 

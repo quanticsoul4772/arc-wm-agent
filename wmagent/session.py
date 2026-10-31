@@ -105,7 +105,18 @@ class ActionRefused(Exception):
 
 
 class SessionCrashed(RuntimeError):
-    """The agent returned no result for a turn."""
+    """The agent returned no result for a turn, or its requests kept failing."""
+
+
+class _EngineFailure(Exception):
+    """game.execute raised; step_env turns it into an error payload (spec 2.3). Host-side failures after a
+    successful execute (state file, events) are not caught as engine failures."""
+
+
+# A dead or broken model server used to make every remaining game retry once a second until its cap, with
+# nothing on stdout. Request failures in a row are now printed, backed off and capped.
+MAX_REQUEST_FAILURES = 10
+REQUEST_BACKOFF_MAX_S = 30.0
 
 
 class SessionGame(Protocol):
@@ -116,6 +127,7 @@ class SessionGame(Protocol):
     state: str  # "playing", "won", "gave_up", "cancelled" or "crashed"
     levels_completed: int
     solver_note: str
+    end_reason: str | None  # set by the session: won, time_cap, action_cap, stop_flag, crash, ...
     frame: Any  # the latest FrameDataRaw: .frame (layers), .state, .levels_completed, .available_actions
 
     def execute(self, action: GameAction, data: dict[str, Any] | None = None, *, generated_tokens: int = 0) -> Any:
@@ -220,6 +232,8 @@ class GameSession:
     def run(self) -> None:
         if self.play_started is None:
             self.play_started = self.clock()
+        failures = 0
+        reason = "crash"
         try:
             self._seed()
             self.analysis_step = 1
@@ -241,20 +255,49 @@ class GameSession:
                     raise SessionCrashed(f"agent returned no result at analysis step {self.analysis_step}")
                 self._append_analysis_event()
                 if result.get("retryable_failure"):
-                    self.sleep(1.0)
+                    failures += 1
+                    error = result.get("error") or "no error text"
+                    print(f"[session] {self._name()} request failed ({failures}/{MAX_REQUEST_FAILURES} in a row) "
+                          f"at analysis step {self.analysis_step}: {error}", flush=True)
+                    if failures >= MAX_REQUEST_FAILURES:
+                        raise SessionCrashed(f"{failures} request failures in a row; last: {error}")
+                    self.sleep(min(REQUEST_BACKOFF_MAX_S, 2.0 ** (failures - 1)))
                     continue
+                failures = 0
                 if result.get("yielded_control"):
                     continue
                 self.analysis_step += 1
+            reason = self._end_reason()
         except BaseException as exc:
             if isinstance(exc, Exception):
                 self.game.mark_crashed(f"error: {type(exc).__name__}: {exc}")
+            else:
+                reason = "interrupted"
             raise
         finally:
             if not self.game.solver_note:
                 self.game.solver_note = f"tokens={self.agent.generated_tokens}"
+            self.game.end_reason = reason
             self.game.finish(self._take_tokens())
             self.state_path.unlink(missing_ok=True)
+            self._append_end_event(reason)
+
+    def _name(self) -> str:
+        return getattr(self.game, "label", "") or self.game.game_id
+
+    def _end_reason(self) -> str:
+        """Why the turn loop stopped, in should_stop's order (every game in arms A-C ended `gave_up`)."""
+        if self._observed_state() == GameState.WIN:
+            return "won"
+        if self.game.state != "playing":
+            return self.game.state
+        if self.stop_flag.is_set():
+            return "stop_flag"
+        if self.time_cap_s is not None and self.elapsed() >= self.time_cap_s:
+            return "time_cap"
+        if self.max_actions is not None and self.action_count >= self.max_actions:
+            return "action_cap"
+        return "unknown"
 
     def should_stop(self) -> bool:
         if self.game.state != "playing" or self.stop_flag.is_set():
@@ -307,8 +350,9 @@ class GameSession:
                 break
             try:
                 payload = self._execute_one(request, self._take_tokens(), index, len(requests))
-            except Exception as exc:  # noqa: BLE001 - any engine failure becomes an error payload or action_error (spec 2.3)
-                detail = f"{request.display} failed in the engine: {type(exc).__name__}: {exc}"
+            except _EngineFailure as exc:  # an engine failure becomes an error payload or action_error (spec 2.3)
+                detail = f"{request.display} failed in the engine: {exc}"
+                print(f"[session] {self._name()} engine error: {detail}", flush=True)
                 if not payloads:
                     return self._error(detail)
                 stop_reason, stop_detail = "action_error", detail
@@ -392,7 +436,10 @@ class GameSession:
     def _execute_one(self, request: _Request, tokens: int, batch_index: int, batch_size: int) -> dict[str, Any]:
         before_grid = self._grid()
         before_levels = self._levels_completed()
-        self.game.execute(request.action, request.data, generated_tokens=tokens)
+        try:
+            self.game.execute(request.action, request.data, generated_tokens=tokens)
+        except Exception as exc:  # any engine failure is reported to the model (spec 2.3)
+            raise _EngineFailure(f"{type(exc).__name__}: {exc}") from exc
         observation = self.game.frame
         self.last_engine_action = request.action
         self.action_count += 1
@@ -473,6 +520,18 @@ class GameSession:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+
+    def _append_end_event(self, reason: str) -> None:
+        self._append_event(
+            {
+                "type": "end",
+                "reason": reason,
+                "action_num": self.action_count,
+                "analysis_step": self.analysis_step,
+                "elapsed_seconds": round(self.elapsed(), 3),
+            },
+            self._grid() if self.history else [],
+        )
 
     def _append_analysis_event(self) -> None:
         transcript = ""

@@ -254,6 +254,7 @@ class Game:
     actions_per_level: list[int] = field(default_factory=list)
     levels_completed: int = 0
     solver_note: str = ""
+    end_reason: str | None = None
     final_generated_tokens: int = 0
     final_uncached_input_tokens: int = 0
     final_wallclock_seconds: float | None = None
@@ -419,6 +420,8 @@ class Game:
         return (
             f"[finished] {self.game_id} state={self.state} level={self.levels_completed}/{self.number_of_levels} "
             f"score={score:.2f} actions={len(self.history)} tokens={self.generated_tokens} per-level={per_level}"
+            + (f" end={self.end_reason}" if self.end_reason else "")
+            + (f" note={self.solver_note!r}" if self.state == CRASHED else "")
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -432,6 +435,7 @@ class Game:
             "levels_completed": self.levels_completed,
             "final_score": self.final_score,
             "solver_note": self.solver_note,
+            "end_reason": self.end_reason,
             "solver_analysis_html": f"solver_analysis/{self.label}.html" if self.label else None,
             "final_generated_tokens": self.final_generated_tokens,
             "final_uncached_input_tokens": self.final_uncached_input_tokens,

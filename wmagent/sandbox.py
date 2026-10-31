@@ -170,11 +170,12 @@ def run_sandboxed_python(
         "color_chars": color_chars or ASCII_ALPHABET,
     }
     deadline = time.monotonic() + float(timeout_seconds)
+    errlog = tempfile.TemporaryFile()  # noqa: SIM115 - the child's stderr, read if it dies; closed in the finally
     proc = subprocess.Popen(
         [sys.executable, "-I", "-S", "-u", str(Path(__file__).resolve())],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=errlog,
         cwd=str(sandbox_cwd),
         env=_child_env(),
         start_new_session=True,
@@ -188,18 +189,32 @@ def run_sandboxed_python(
     def failure(error: str) -> dict[str, Any]:
         return {"error": error, "stdout": "", "action_results": action_results}
 
+    def exited() -> dict[str, Any]:
+        """The child died: say how (exit code or signal, end of its stderr) instead of one message for all."""
+        try:
+            code = proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            code = None
+        errlog.seek(0)
+        tail = errlog.read()[-300:].decode("utf-8", "replace").strip()
+        detail = f"Sandbox process exited unexpectedly (exit code {code})."
+        if tail:
+            detail += f" stderr: {tail}"
+        print(f"[sandbox] {detail}", flush=True)
+        return failure(detail)
+
     try:
         try:
             send(request)
         except (BrokenPipeError, OSError):
-            return failure("Sandbox process exited unexpectedly.")
+            return exited()
         while True:
             try:
                 line = channel.read_line(deadline)
             except TimeoutError:
                 return failure(f"Tool timed out after {_timeout_label(timeout_seconds)}")
             if line is None:
-                return failure("Sandbox process exited unexpectedly.")
+                return exited()
             try:
                 message = json.loads(line.decode("utf-8"))
                 kind = message["type"]
@@ -210,7 +225,7 @@ def run_sandboxed_python(
                 try:
                     send(reply)
                 except (BrokenPipeError, OSError):
-                    return failure("Sandbox process exited unexpectedly.")
+                    return exited()
                 continue
             if kind == "final":
                 return {
@@ -228,6 +243,7 @@ def run_sandboxed_python(
     finally:
         _kill_group(proc)
         channel.close()
+        errlog.close()
         for stream in (proc.stdin, proc.stdout):
             try:
                 stream.close()
@@ -248,7 +264,12 @@ def _handle_action(
         reply = handler(actions)
     except ActionRefused as exc:
         return {"type": "action_error", "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - the handler's failure is reported to the model's code, not raised here
+    except Exception as exc:  # noqa: BLE001 - reported to the model's code (bad model input lands here too)
+        # ...and printed with its traceback, so a host bug behind it does not pass as the model's mistake
+        import traceback
+
+        print(f"[sandbox] action handler raised (reported to the model): {type(exc).__name__}: {exc}", flush=True)
+        traceback.print_exc()
         return {"type": "action_error", "error": f"{type(exc).__name__}: {exc}"}
     reply = reply if isinstance(reply, dict) else {}
     action_result = reply.get("action_result")
