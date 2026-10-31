@@ -202,8 +202,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
-    ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all"], default=None,
-                    help="Plan C arm: base (as before), m1a (capture-on-deny + stated rule), all. Required for "
+    ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all", "all-nocont"], default=None,
+                    help="Plan C arm: base (as before), m1a (capture-on-deny + stated rule), all, all-nocont (all without "
+                    "the yield-continuation prompt). Required for "
                     "a push: any pushed kernel can become a submission, and a missing arm would silently ship "
                     "base. A --dry-run without it writes base.")
     ap.add_argument("--license", default="unknown", help="Kaggle dataset license name")
@@ -218,7 +219,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     a = parse_args(argv)
     if a.wm_mechanisms is None and not a.dry_run:
-        raise SystemExit("[build] --wm-mechanisms is required for a push (base, m1a or all): any pushed kernel can "
+        raise SystemExit("[build] --wm-mechanisms is required for a push (base, m1a, all or all-nocont): any pushed kernel can "
                          "become a submission, and a missing arm would silently ship base")
     src_dir, kernel_dir = build(a)
     print(f"[build] bundle {src_dir}\n[build] kernel {kernel_dir}\n[build] WM_MECHANISMS={a.wm_mechanisms or 'base'}",

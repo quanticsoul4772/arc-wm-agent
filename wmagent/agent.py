@@ -18,7 +18,7 @@ import requests
 
 from wmagent import prompts
 from wmagent.progress import ProgressMonitor
-from wmagent.world_model_gate import BACKTEST_DRIVER, WorldModelGate, mechanisms_from_env
+from wmagent.world_model_gate import BACKTEST_DRIVER, FULL_MECHANISMS, WorldModelGate, mechanisms_from_env
 
 # ---------------------------------------------------------------------------
 # configuration (read from the environment at import time; names are the interface)
@@ -714,8 +714,9 @@ class ToolAgent:
             self._new_game()
             if self.gate is not None:
                 self.gate.reset(state_path)
-            # M2 / M4d: the no-progress breaker and level memory (WM_MECHANISMS=all only)
-            self.progress = ProgressMonitor.for_state(state_path) if self.config.mechanisms == "all" else None
+            # M2 / M4d: the no-progress breaker and level memory (WM_MECHANISMS=all / all-nocont only)
+            self.progress = (ProgressMonitor.for_state(state_path) if self.config.mechanisms in FULL_MECHANISMS
+                             else None)
         saved_history = list(self.history)
         self._saved_history = saved_history
         try:
@@ -897,7 +898,7 @@ class ToolAgent:
                      persist: bool = True):
         if persist:
             self.history = persistable_history(messages, self.config.budget)
-            if self.config.mechanisms == "all":
+            if self.config.mechanisms in FULL_MECHANISMS:
                 # M4b: a user message loses its board image when it is kept, once; the live request carries the
                 # current board, and a message never changes after it is kept.
                 self.history = [_without_board_image(m) for m in self.history]
@@ -912,7 +913,8 @@ class ToolAgent:
                     self.notes.pop(key, None)
         reasoning = "\n".join(reasoning_seen)
         # M2c: continue with a short prompt only when this turn's own messages were kept; after a reverted
-        # history the model would not see what it was doing, so the next turn gets the full prompt.
+        # history the model would not see what it was doing, so the next turn gets the full prompt. Off in
+        # all-nocont.
         self._continuing = (self.config.mechanisms == "all" and bool(yielded) and not ctx.executed_any
                             and persist and yielded != "stop_requested")
         if yielded and not ctx.executed_any:

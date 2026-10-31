@@ -56,8 +56,10 @@ HELDOUT_N = 3
 HELDOUT_PASS_HITS = 3
 
 # WM_MECHANISMS (Plan C arms): "base" is the harness as it was, "m1a" adds capture-on-deny and the
-# stated acceptance rule, "all" adds every Plan C mechanism. Read only in from_env / AgentConfig.from_env.
-MECHANISMS = ("base", "m1a", "all")
+# stated acceptance rule, "all" adds every Plan C mechanism, "all-nocont" is "all" without the yield-continuation
+# prompt (M2c; arm C slowed down on it, C201). Read only in from_env / AgentConfig.from_env.
+MECHANISMS = ("base", "m1a", "all", "all-nocont")
+FULL_MECHANISMS = ("all", "all-nocont")
 
 
 def mechanisms_from_env() -> str:
@@ -224,8 +226,8 @@ class WorldModelGate:
 
     @property
     def full(self) -> bool:
-        """WM_MECHANISMS=all: deny evidence (M1b), carried grant (M1c), release valve (M1d)."""
-        return self.mechanisms == "all"
+        """WM_MECHANISMS=all / all-nocont: deny evidence (M1b), carried grant (M1c), release valve (M1d)."""
+        return self.mechanisms in FULL_MECHANISMS
 
     def reset(self, state_path: Path) -> None:
         stem = state_path.name.removesuffix(".json").removesuffix("_tool_runtime_state")
