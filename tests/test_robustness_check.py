@@ -49,3 +49,16 @@ def test_replicate_runs_are_pooled(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "arm: 24 runs, mean 1.000, games with >= 1 level 18/24 (75%)" in out
     assert "aa11: arm 1.000  base 1.000  diff +0.000" in out
+
+
+def test_runs_with_different_gate_settings_are_not_pooled(tmp_path, capsys):
+    import json
+
+    first = _run(tmp_path, "f", "x", [1.0] * 12)
+    other = _run(tmp_path, "h", "x", [1.0] * 12)
+    for log in (other / "artifacts").glob("*_wm_gate.jsonl"):
+        log.write_text(json.dumps({"event": "session_start", "mechanisms": "x", "probe_actions": 16}) + "\n")
+    base = _run(tmp_path, "base", "base", [1.0] * 12)
+    assert robustness.main(["--arm", str(first), "--arm", str(other), "--arm-mechanisms", "x", "--base", str(base),
+                            "--games", "12", "--draws", "200"]) == 1
+    assert "pooled runs differ in gate settings" in capsys.readouterr().err
