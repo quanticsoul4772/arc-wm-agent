@@ -18,7 +18,13 @@ import requests
 
 from wmagent import prompts
 from wmagent.progress import ProgressMonitor
-from wmagent.world_model_gate import BACKTEST_DRIVER, FULL_MECHANISMS, WorldModelGate, mechanisms_from_env
+from wmagent.world_model_gate import (
+    BACKTEST_DRIVER,
+    ELIDE_IMAGE_MECHANISMS,
+    FULL_MECHANISMS,
+    WorldModelGate,
+    mechanisms_from_env,
+)
 
 # ---------------------------------------------------------------------------
 # configuration (read from the environment at import time; names are the interface)
@@ -923,7 +929,7 @@ class ToolAgent:
                      persist: bool = True):
         if persist:
             self.history = persistable_history(messages, self.config.budget)
-            if self.config.mechanisms in FULL_MECHANISMS:
+            if self.config.mechanisms in ELIDE_IMAGE_MECHANISMS:
                 # M4b: a user message loses its board image when it is kept, once; the live request carries the
                 # current board, and a message never changes after it is kept.
                 self.history = [_without_board_image(m) for m in self.history]

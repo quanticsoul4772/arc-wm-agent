@@ -61,10 +61,14 @@ HELDOUT_PASS_HITS = 3
 # prompt (M2c; arm C slowed down on it, C201), "all-nocont-fb" is "all-nocont" plus the verdict after every cell
 # that defines predict, with the backtest error and a wrong board shape spelled out, "all-nocont-fbx" is
 # "all-nocont-fb" plus four fixes from the C200 logs: a rejected action costs no probe, a release is announced,
-# traceback line numbers point into the model's own cell, and capture keeps only self-contained constants.
+# traceback line numbers point into the model's own cell, and capture keeps only self-contained constants;
+# "all-nocont-fbx-img" is "all-nocont-fbx" with past board images kept in the history (no M4b elision: C2 and D
+# generated ~40% more tokens per turn than A once their history held earlier turns without images, C201).
 # Read only in from_env / AgentConfig.from_env.
-MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
-FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
+MECHANISMS = ("base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
+FULL_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
+# Arms whose kept user messages lose their board image (M4b).
+ELIDE_IMAGE_MECHANISMS = ("all", "all-nocont", "all-nocont-fb", "all-nocont-fbx")
 
 
 def mechanisms_from_env() -> str:
@@ -297,13 +301,13 @@ class WorldModelGate:
     def capture_feedback(self) -> bool:
         """WM_MECHANISMS=all-nocont-fb / fbx: the verdict after every cell that defines predict, with the
         backtest error and a wrong board shape spelled out."""
-        return self.mechanisms in ("all-nocont-fb", "all-nocont-fbx")
+        return self.mechanisms in ("all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img")
 
     @property
     def fixes(self) -> bool:
         """WM_MECHANISMS=all-nocont-fbx: rejected actions cost no probe, releases are announced, traceback lines
         point into the model's cell, capture keeps only self-contained constants."""
-        return self.mechanisms == "all-nocont-fbx"
+        return self.mechanisms in ("all-nocont-fbx", "all-nocont-fbx-img")
 
     @property
     def full(self) -> bool:

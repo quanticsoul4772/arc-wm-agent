@@ -202,10 +202,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
-    ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx"], default=None,
+    ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img"], default=None,
                     help="Plan C arm: base (as before), m1a (capture-on-deny + stated rule), all, all-nocont (all without "
                     "the yield-continuation prompt), all-nocont-fb (all-nocont plus the verdict after every cell "
-                    "that defines predict), all-nocont-fbx (all-nocont-fb plus the C200 log fixes). Required for "
+                    "that defines predict), all-nocont-fbx (all-nocont-fb plus the C200 log fixes), all-nocont-fbx-img (all-nocont-fbx keeping past board images). Required for "
                     "a push: any pushed kernel can become a submission, and a missing arm would silently ship "
                     "base. A --dry-run without it writes base.")
     ap.add_argument("--license", default="unknown", help="Kaggle dataset license name")
@@ -220,7 +220,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     a = parse_args(argv)
     if a.wm_mechanisms is None and not a.dry_run:
-        raise SystemExit("[build] --wm-mechanisms is required for a push (base, m1a, all, all-nocont, all-nocont-fb or all-nocont-fbx): any pushed kernel can "
+        raise SystemExit("[build] --wm-mechanisms is required for a push (base, m1a, all, all-nocont, all-nocont-fb, all-nocont-fbx or all-nocont-fbx-img): any pushed kernel can "
                          "become a submission, and a missing arm would silently ship base")
     src_dir, kernel_dir = build(a)
     print(f"[build] bundle {src_dir}\n[build] kernel {kernel_dir}\n[build] WM_MECHANISMS={a.wm_mechanisms or 'base'}",
