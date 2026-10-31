@@ -97,6 +97,7 @@ def _start_server(base_env):
             server_cmd=[sys.executable, "-m", "wmagent.kaggle.stub_openai", "--port", str(LLM_PORT)] if STUB_LLM else None,
             port=LLM_PORT, base_env=base_env,
         )
+        setup_vllm.start_watchdog(SERVER)
     except BaseException as exc:  # re-raised by _server_ready on the main thread
         _SERVER_ERROR.append(exc)
 

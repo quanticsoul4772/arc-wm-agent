@@ -12,6 +12,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import threading
 import time
 import traceback
@@ -260,7 +261,7 @@ class Runner:
         except Exception as exc:  # noqa: BLE001 - printed with its traceback; teardown runs, then offline re-raises
             error = exc
             print(f"[runner] solver error: {type(exc).__name__}: {exc}", flush=True)
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stdout)
         finally:
             heartbeat_stop.set()
             result = self._teardown(n_passes, error)
@@ -319,7 +320,7 @@ class Runner:
             game.mark_crashed(f"error: {type(exc).__name__}: {exc}")
             game.end_reason = game.end_reason or "crash"
             print(f"[runner] {game.label or game.game_id} crashed: {type(exc).__name__}: {exc}", flush=True)
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stdout)
         finally:
             game.finish()
 

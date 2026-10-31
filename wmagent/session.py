@@ -108,6 +108,12 @@ class SessionCrashed(RuntimeError):
     """The agent returned no result for a turn, or its requests kept failing."""
 
 
+class HostFailure(RuntimeError):
+    """The engine action ran but the host failed after it (state file, events sidecar). The game cannot be
+    trusted to continue (the gate's count and the state file would disagree with the engine), so this crashes it
+    instead of reaching the model as an action error."""
+
+
 class _EngineFailure(Exception):
     """game.execute raised; step_env turns it into an error payload (spec 2.3). Host-side failures after a
     successful execute (state file, events) are not caught as engine failures."""
@@ -443,6 +449,13 @@ class GameSession:
             self.game.execute(request.action, request.data, generated_tokens=tokens)
         except Exception as exc:  # any engine failure is reported to the model (spec 2.3)
             raise _EngineFailure(f"{type(exc).__name__}: {exc}") from exc
+        try:
+            return self._after_execute(request, before_grid, before_levels, batch_index, batch_size)
+        except Exception as exc:
+            raise HostFailure(f"after {request.display} ran: {type(exc).__name__}: {exc}") from exc
+
+    def _after_execute(self, request: _Request, before_grid: list[list[int]], before_levels: int, batch_index: int,
+                       batch_size: int) -> dict[str, Any]:
         observation = self.game.frame
         self.last_engine_action = request.action
         self.action_count += 1

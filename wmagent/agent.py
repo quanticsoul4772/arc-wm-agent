@@ -825,6 +825,8 @@ class ToolAgent:
             before_trim = len(messages)
             messages = trim_messages(messages, self.config.budget)
             self._request_counter += 1
+            if self.gate is not None:
+                self.gate.request = self._request_counter
             self._snapshot(state_path, step, self._request_counter, messages)
             sent = len(messages)
             request_started = time.time()

@@ -65,7 +65,7 @@ if __name__ != "__main__":
     # script under -I -S) must not import the session, which needs site-packages.
     # An action handler raises ActionRefused to reject an `action()` request; the
     # model's code sees a RuntimeError carrying the same message.
-    from wmagent.session import ActionRefused
+    from wmagent.session import ActionRefused, HostFailure
 
 __all__ = ["ALLOWED_MODULES", "ActionRefused", "run_sandboxed_python"]
 
@@ -269,6 +269,8 @@ def _handle_action(
         reply = handler(actions)
     except ActionRefused as exc:
         return {"type": "action_error", "error": str(exc)}
+    except HostFailure:
+        raise  # the host broke after the action ran: the game crashes (session.HostFailure), the model is not told
     except Exception as exc:  # noqa: BLE001 - reported to the model's code (bad model input lands here too)
         # ...and printed with its traceback, so a host bug behind it does not pass as the model's mistake; a cell
         # that loops on the same failing call prints the first few only
@@ -278,7 +280,7 @@ def _handle_action(
 
             print(f"[sandbox] action handler raised (reported to the model): {type(exc).__name__}: {exc}",
                   flush=True)
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stdout)
         return {"type": "action_error", "error": f"{type(exc).__name__}: {exc}"}
     reply = reply if isinstance(reply, dict) else {}
     action_result = reply.get("action_result")
