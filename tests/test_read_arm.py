@@ -83,3 +83,10 @@ def test_a_missing_score_stops(tmp_path, capsys):
     base = _run(tmp_path, "base", "base", [1.0] * 4)
     assert _main(arm, base) == 1
     assert "games without a score" in capsys.readouterr().err
+
+
+def test_alpha_sets_the_primary_threshold(tmp_path, capsys):
+    arm = _run(tmp_path, "arm", "all-nocont", [3.0, 3.0, 3.0, 3.0])
+    base = _run(tmp_path, "base", "base", [0.0, 0.0, 0.0, 0.0])
+    assert _main(arm, base, "--alpha", "0.0001") == 0
+    assert "primary FAIL (p < 0.0001)" in capsys.readouterr().out

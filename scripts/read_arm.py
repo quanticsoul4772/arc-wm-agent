@@ -12,7 +12,7 @@ scores reshuffled within each game), the harm guard, the SHIP / NO SHIP verdict,
 secondaries from the per-request logs.
 
 Usage: python -I scripts/read_arm.py --arm RUN_DIR --arm-mechanisms all-nocont --base RUN_DIR
-       [--base-mechanisms base] [--games 30] [--draws 100000] [--seed 20261029] [--crashes-reviewed]
+       [--base-mechanisms base] [--games 30] [--draws 100000] [--seed 20261029] [--alpha 0.05] [--crashes-reviewed]
 """
 from __future__ import annotations
 
@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--games", type=int, default=30)
     ap.add_argument("--draws", type=int, default=100_000)
     ap.add_argument("--seed", type=int, default=20261029)
+    ap.add_argument("--alpha", type=float, default=0.05, help="primary pass threshold (C202 reads D at 0.025)")
     ap.add_argument("--crashes-reviewed", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -139,11 +140,11 @@ def main(argv: list[str] | None = None) -> int:
     cleared_arm = sum(1 for r in arm if (r.get("levels_completed") or 0) >= 1)
     cleared_base = sum(1 for r in base if (r.get("levels_completed") or 0) >= 1)
     diff, p = permutation_p(arm, base, a.draws, a.seed)
-    primary = p < 0.05
+    primary = p < a.alpha
     guard = cleared_arm >= cleared_base
     print(f"mean arm {mean_arm:.3f}  base {mean_base:.3f}  T {diff:+.3f}  p {p:.4f} ({a.draws} draws, seed {a.seed})")
     print(f"games with >= 1 level: arm {cleared_arm}  base {cleared_base}")
-    print(f"primary {'PASS' if primary else 'FAIL'}  harm guard {'PASS' if guard else 'FAIL'}  "
+    print(f"primary {'PASS' if primary else 'FAIL'} (p < {a.alpha})  harm guard {'PASS' if guard else 'FAIL'}  "
           f"=> {'SHIP' if primary and guard else 'NO SHIP'}")
     print(f"call economy arm  {call_economy(a.arm)}")
     print(f"call economy base {call_economy(a.base)}")
