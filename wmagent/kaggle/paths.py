@@ -16,6 +16,9 @@ from pathlib import Path
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-3"
 WHEELHOUSE_REF = "driessmit1/arc3-vllm-h100-wheelhouse-v3"
 MODEL_REF = "driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot"
+# The BF16 multi-token-prediction head of Qwen/Qwen3.6-27B (its 15 `mtp.*` tensors only): the FP8 snapshot above
+# ships `mtp_num_hidden_layers: 1` in its config but no MTP weights. Grafted at staging for speculative decoding.
+MTP_REF = "quanticsoul4772/wm-qwen36-27b-mtp-head"
 BUNDLE_MARKER = "wmagent-bundle.json"
 
 # Directories never worth descending into while searching.
@@ -88,6 +91,10 @@ def is_model_dir(d: Path) -> bool:
     return (d / "config.json").is_file() and any(d.glob("*.safetensors"))
 
 
+def is_mtp_dir(d: Path) -> bool:
+    return (d / "mtp.safetensors").is_file() and not (d / "config.json").is_file()
+
+
 def is_bundle_dir(d: Path) -> bool:
     return (d / BUNDLE_MARKER).is_file()
 
@@ -102,6 +109,10 @@ def find_wheelhouse(root: Path | None = None) -> Path:
 
 def find_model(root: Path | None = None) -> Path:
     return find_dir(root or input_root(), MODEL_REF, is_model_dir, "model snapshot")
+
+
+def find_mtp(root: Path | None = None) -> Path:
+    return find_dir(root or input_root(), MTP_REF, is_mtp_dir, "MTP head")
 
 
 def find_bundle(slug: str = "", root: Path | None = None) -> Path:

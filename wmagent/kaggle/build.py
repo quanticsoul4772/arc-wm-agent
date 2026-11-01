@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import notebook
-from .paths import BUNDLE_MARKER, COMPETITION_SLUG, MODEL_REF, WHEELHOUSE_REF
+from .paths import BUNDLE_MARKER, COMPETITION_SLUG, MODEL_REF, MTP_REF, WHEELHOUSE_REF
 
 DOCKER_IMAGE = "gcr.io/kaggle-private-byod/python@sha256:57e612b484cf3df5026ee4dcc3cb176974b22b2bc0937fb1e16132a8be4cb13c"
 MACHINE_SHAPE = "NvidiaRtxPro6000"
@@ -62,6 +62,7 @@ def agent_env(a: argparse.Namespace) -> dict[str, str]:
         "PROBE_MAX_REFUSALS": str(a.probe_max_refusals), "PROBE_RELEASE_AFTER_ACCEPT": str(a.probe_release_after_accept),
         "PROBE_OPTIONAL": str(a.probe_optional), "WM_MECHANISMS": a.wm_mechanisms or "base",
         "LOCAL_ANALYZER_IMAGE_TOKENS": str(a.image_tokens),
+        "WM_SPEC_MTP_TOKENS": str(a.spec_mtp_tokens),
     })
     return env
 
@@ -104,7 +105,8 @@ def write_bundle(dst: Path, *, owner: str, slug: str, label: str, config: dict[s
     }, indent=2) + "\n")
 
 
-def kernel_metadata(*, owner: str, kernel_slug: str, bundle_ref: str, private: bool) -> dict[str, Any]:
+def kernel_metadata(*, owner: str, kernel_slug: str, bundle_ref: str, private: bool,
+                    mtp: bool = False) -> dict[str, Any]:
     return {
         "id": f"{owner}/{kernel_slug}",
         "title": kernel_slug,
@@ -115,7 +117,7 @@ def kernel_metadata(*, owner: str, kernel_slug: str, bundle_ref: str, private: b
         "enable_gpu": True,
         "enable_tpu": False,
         "enable_internet": False,
-        "dataset_sources": [bundle_ref, WHEELHOUSE_REF, MODEL_REF],
+        "dataset_sources": [bundle_ref, WHEELHOUSE_REF, MODEL_REF, *([MTP_REF] if mtp else [])],
         "competition_sources": [COMPETITION_SLUG],
         "kernel_sources": [],
         "model_sources": [],
@@ -138,7 +140,8 @@ def build(a: argparse.Namespace) -> tuple[Path, Path]:
     write_bundle(src_dir, owner=a.owner, slug=a.slug, label=a.label, config=run_config(a), env=agent_env(a),
                  license_name=a.license)
     write_kernel(kernel_dir, meta=kernel_metadata(owner=a.owner, kernel_slug=a.kernel_slug,
-                                                  bundle_ref=f"{a.owner}/{a.slug}", private=not a.public),
+                                                  bundle_ref=f"{a.owner}/{a.slug}", private=not a.public,
+                                                  mtp=a.spec_mtp_tokens > 0),
                  bundle_slug=a.slug)
     return src_dir, kernel_dir
 
@@ -203,6 +206,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--probe-max-refusals", type=int, default=8)
     ap.add_argument("--probe-release-after-accept", type=int, default=0)
     ap.add_argument("--probe-optional", type=int, default=0)
+    ap.add_argument("--spec-mtp-tokens", type=int, default=0,
+                    help="speculative decoding with the MTP head (paths.MTP_REF): draft tokens per step; 0 = off")
     ap.add_argument("--image-tokens", type=int, default=0,
                     help="tokens the context estimate charges per image part (0: its base64 text/3, as up to C204)")
     ap.add_argument("--wm-mechanisms", choices=["base", "m1a", "all", "all-nocont", "all-nocont-fb", "all-nocont-fbx", "all-nocont-fbx-img"], default=None,

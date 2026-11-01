@@ -83,6 +83,7 @@ sys.modules["setup_vllm"] = setup_vllm
 _spec.loader.exec_module(setup_vllm)
 
 AGENT_ENV = json.loads((BUNDLE / "agent_env.json").read_text())
+MTP_DIR = (_paths.find_mtp(INPUT) if not STUB_LLM and setup_vllm.spec_tokens(AGENT_ENV) else None)
 LLM_PORT = int(os.environ.get("WMAGENT_LLM_PORT", setup_vllm.PORT))
 SERVER = None
 _SERVER_ERROR = []
@@ -95,7 +96,7 @@ def _start_server(base_env):
         SERVER = setup_vllm.start(
             model_dir=MODEL_DIR, wheelhouse=WHEELHOUSE, working=WORKING, agent_env=AGENT_ENV,
             server_cmd=[sys.executable, "-m", "wmagent.kaggle.stub_openai", "--port", str(LLM_PORT)] if STUB_LLM else None,
-            port=LLM_PORT, base_env=base_env,
+            port=LLM_PORT, base_env=base_env, mtp_dir=MTP_DIR,
         )
         setup_vllm.start_watchdog(SERVER)
     except BaseException as exc:  # re-raised by _server_ready on the main thread
